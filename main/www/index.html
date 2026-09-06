@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轮速验证台</title>
+<style>
+  :root { --bg:#111; --panel:#1b1b1b; --border:#333; --text:#e0e0e0; --dim:#999; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang SC",sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:18px; margin:0; }
+  #status-dot { width:10px; height:10px; border-radius:50%; }
+  .ok { background:#4caf50; } .warn { background:#ff9800; }
+  main { max-width:1100px; margin:0 auto; padding:12px; }
+  h2 { font-size:15px; margin:16px 0 8px; color:var(--dim); }
+  .grid { display:grid; gap:10px; }
+  @media (min-width:900px){ .grid-4{grid-template-columns:repeat(4,1fr);} .grid-2{grid-template-columns:repeat(2,1fr);} }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px; }
+  .wheel { font-size:12px; }
+  .wheel .name { font-weight:600; margin-bottom:6px; display:flex; justify-content:space-between; }
+  .rpm { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .rpm small { font-size:11px; color:var(--dim); font-weight:400; }
+  .row { display:flex; justify-content:space-between; margin-top:2px; color:var(--dim); font-size:11px; }
+  .row b { color:var(--text); font-variant-numeric:tabular-nums; }
+  .trigger { display:inline-block; width:8px; height:8px; border-radius:50%; background:#555; }
+  .trigger.on { background:#ff5252; box-shadow:0 0 6px #ff5252; }
+  canvas#chart { width:100%; height:220px; background:#151515; border:1px solid var(--border); border-radius:8px; }
+  .io { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+  .io .cell { text-align:center; padding:6px; border:1px solid var(--border); border-radius:6px; font-family:monospace; }
+  .io .hi { background:#1e3a1e; color:#7fdc7f; } .io .lo { background:#3a1e1e; color:#ff7f7f; }
+  .cfg-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
+  .cfg-grid label { font-size:11px; color:var(--dim); display:block; margin-bottom:2px; }
+  .cfg-grid input { width:100%; background:#222; color:var(--text); border:1px solid var(--border); border-radius:4px; padding:4px 6px; }
+  button { background:#2d2d2d; color:var(--text); border:1px solid var(--border); border-radius:4px; padding:6px 12px; cursor:pointer; font-size:12px; }
+  button:hover { background:#3a3a3a; }
+  .en { display:flex; gap:8px; margin:4px 0; align-items:center; font-size:12px; }
+  .en input { vertical-align:middle; }
+  label { font-size:12px; }
+  .disabled { opacity:0.45; pointer-events:none; }
+  .note { font-size:11px; color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>RC 攀爬车四轮转速验证台</h1>
+  <span id="status-dot" class="warn"></span>
+  <span id="status-text" class="note">连接中…</span>
+  <span style="margin-left:auto" id="conn-info" class="note"></span>
+</header>
+<main>
+  <h2>四轮仪表</h2>
+  <div class="grid grid-4" id="wheels"></div>
+
+  <h2>轮速曲线（最近 30s，RPM）</h2>
+  <canvas id="chart"></canvas>
+
+  <div class="grid grid-2" style="margin-top:12px">
+    <div class="card">
+      <h2>原始 IO 电平监视 <span class="note">(验证接线/供电)</span></h2>
+      <div class="io" id="io"></div>
+      <div class="row" style="margin-top:8px"><span>信号源</span><b id="src">—</b></div>
+      <div class="row"><span>剩余内存</span><b id="heap">—</b></div>
+      <div class="row"><span>运行时长</span><b id="uptime">—</b></div>
+    </div>
+    <div class="card">
+      <h2>模拟模式 <span class="note">(注入合成数据验证显示/计算链路)</span></h2>
+      <label><input type="checkbox" id="sim-toggle"> 启用模拟源</label>
+      <div class="cfg-grid" id="sim-inputs"></div>
+      <div style="margin-top:8px"><button id="sim-apply">应用模拟转速</button></div>
+      <p class="note">模拟与真实霍尔共用同一条计算链：每窗口按目标 RPM 合成脉冲，验证显示与策略输入是否一致。</p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>采集配置 <span class="note">(NVS 持久化)</span></h2>
+    <div class="en" id="en-toggle"></div>
+    <div class="cfg-grid">
+      <div><label>磁铁数/转</label><input id="magnets" type="number" min="1" max="16" value="1"></div>
+      <div><label>轮径(mm)</label><input id="diam" type="number" min="10" max="300" value="100"></div>
+      <div><label>EMA 系数</label><input id="alpha" type="number" min="0.05" max="1" step="0.05" value="0.3"></div>
+      <div><label>去抖(ms)</label><input id="debounce" type="number" min="0" max="1000" value="0"></div>
+    </div>
+    <div style="margin-top:8px">
+      <button id="cfg-apply">应用配置</button>
+      <button id="reset-counts">清零累计</button>
+    </div>
+  </div>
+
+  <div class="card disabled" style="margin-top:12px">
+    <h2>差速舵机 <span class="note">(二期预留)</span></h2>
+    <p class="note">二期：遥控接收机 PWM 输入（手动模式）→ 前后差速控制器 → 舵机 PWM 输出。齿轮/差速逻辑与 RC 通道绑定暂未实现。</p>
+  </div>
+</main>
+<script>
+"use strict";
+const WHEEL = 4, WS_URL = "ws://" + location.host + "/ws", API = "/api/status", CT = 1000;
+const wheelNames = ["左前", "右前", "左后", "右后"];
+const cols = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373"];
+let ws = null, reconnect = 0, lastFrame = null;
+const hist = { t: [], rpm: [[], [], [], []] };
+
+function $(id) { return document.getElementById(id); }
+function fmt(x, d) { return (x === null || x === undefined || isNaN(x)) ? "—" : Number(x).toFixed(d); }
+
+function buildPanels() {
+  const wheels = $("wheels");
+  for (let i = 0; i < WHEEL; i++) {
+    const div = document.createElement("div");
+    div.className = "card wheel";
+    div.innerHTML = `
+      <div class="name"><span><span class="trigger" id="trig${i}"></span> ${wheelNames[i]}</span><span class="note" id="en${i}"></span></div>
+      <div class="rpm" id="rpm${i}">0.0 <small>RPM</small></div>
+      <div class="row"><span>线速度</span><b id="spd${i}">0.0</b></div>
+      <div class="row"><span>频率</span><b id="freq${i}">0.000 Hz</b></div>
+      <div class="row"><span>累计脉冲</span><b id="pulses${i}">0</b></div>`;
+    wheels.appendChild(div);
+  }
+  const io = $("io");
+  for (let i = 0; i < WHEEL; i++) {
+    const c = document.createElement("div");
+    c.className = "cell"; c.textContent = "G" + i;
+    io.appendChild(c);
+  }
+  const en = $("en-toggle");
+  for (let i = 0; i < WHEEL; i++) {
+    const lab = document.createElement("label");
+    lab.innerHTML = `<input type="checkbox" id="en${i}" checked> ${wheelNames[i]}`;
+    en.appendChild(lab);
+  }
+  const sims = $("sim-inputs");
+  for (let i = 0; i < WHEEL; i++) {
+    const d = document.createElement("div");
+    d.innerHTML = `<label>${wheelNames[i]}</label><input id="sim${i}" type="number" min="0" max="36000" step="1" value="0">`;
+    sims.appendChild(d);
+  }
+}
+
+function drawChart() {
+  const cv = $("chart"), ctx = cv.getContext("2d");
+  const W = cv.width = cv.clientWidth * 2, H = cv.height = 220 * 2;
+  ctx.clearRect(0, 0, W, H);
+  const n = hist.t.length; if (!n) return;
+  const t0 = hist.t[0], t1 = hist.t[n - 1] || t0;
+  const span = Math.max(30000, t1 - t0);
+  const xAt = t => ((t - (t1 - span)) / span) * W;
+  const yMax = Math.max(60, ...hist.rpm.flat().filter(v => v > 0), 1) * 1.15;
+  ctx.strokeStyle = "#333"; ctx.beginPath();
+  for (let g = 0; g < 4; g++) { const y = (g + 1) / 5 * H; ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+  for (let r = 0; r < 4; r++) {
+    const ys = hist.rpm[r];
+    ctx.strokeStyle = cols[r]; ctx.lineWidth = 2 * (cv.width / 1100); ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = xAt(hist.t[i]), y = H - (ys[i] / yMax) * H * 0.92;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#777"; ctx.font = "20px sans-serif"; ctx.fillText(String(Math.round(yMax)) + " RPM", 8, 28);
+}
+
+function applyFrame(f) {
+  const wheels = f.collectors && f.collectors.find(c => c.type === "wheel_speed");
+  $("src").textContent = (wheels && wheels.src === "sim") ? "模拟" : "PCNT 霍尔";
+  $("heap").textContent = f.sys ? (f.sys.free_heap / 1024).toFixed(0) + " KB" : "—";
+  $("uptime").textContent = f.sys ? f.sys.uptime_s + " s" : "—";
+  const io = $("io").children;
+  f.sys && f.sys.gpio.forEach((v, i) => { io[i].textContent = "G" + i + " " + (v ? "高" : "低"); io[i].className = "cell " + (v ? "hi" : "lo"); });
+  if (!wheels) return;
+  const cfg = wheels.cfg || {};
+  $("magnets").value = cfg.magnets ?? 1;
+  $("diam").value = cfg.diam_mm ?? 100;
+  $("alpha").value = cfg.alpha ?? 0.3;
+  $("debounce").value = 0;
+  $("sim-toggle").checked = !!cfg.sim;
+  cfg.sim_rpm && cfg.sim_rpm.forEach((v, i) => { $("sim" + i).value = v; });
+  wheels.wheels.forEach((w, i) => {
+    $("rpm" + i).innerHTML = fmt(w.rpm, 1) + " <small>RPM</small>";
+    $("spd" + i).textContent = fmt(w.speed_cms, 0) + " cm/s";
+    $("freq" + i).textContent = fmt(w.freq, 3) + " Hz";
+    $("pulses" + i).textContent = w.pulses ?? 0;
+    $("trig" + i).className = "trigger" + (w.trigger ? " on" : "");
+    $("en" + i).textContent = w.en ? "" : "(禁用)";
+  });
+  const t = f.t || 0;
+  hist.t.push(t);
+  wheels.wheels.forEach((w, i) => hist.rpm[i].push(w.rpm || 0));
+  const keep = 800;
+  while (hist.t.length > keep) { hist.t.shift(); hist.rpm.forEach(a => a.shift()); }
+  drawChart();
+}
+
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => { $("status-dot").className = "ok"; $("status-text").textContent = "已连接"; reconnect = 0; };
+  ws.onmessage = e => { try { lastFrame = JSON.parse(e.data); applyFrame(lastFrame); } catch (_) {} };
+  ws.onclose = () => { $("status-dot").className = "warn"; $("status-text").textContent = "断开，重连中…"; setTimeout(connectWS, Math.min(1000 * ++reconnect, 5000)); };
+  ws.onerror = () => ws.close();
+}
+function poll() { fetch(API).then(r => r.json()).then(f => { if (!lastFrame) applyFrame(f); }).catch(() => {}); }
+
+function send(cmd) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd));
+  else poll();
+}
+
+function applyCfg() {
+  send({
+    type: "set_cfg",
+    magnets: parseInt($("magnets").value, 10),
+    diam_mm: parseInt($("diam").value, 10),
+    alpha: parseFloat($("alpha").value),
+    debounce_ms: parseInt($("debounce").value, 10),
+    en: [0, 1, 2, 3].map(i => $("en" + i).checked),
+  });
+}
+function applySim() {
+  send({
+    type: "set_cfg",
+    sim: $("sim-toggle").checked,
+    sim_rpm: [0, 1, 2, 3].map(i => parseFloat($("sim" + i).value) || 0),
+  });
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  buildPanels();
+  $("cfg-apply").onclick = applyCfg;
+  $("sim-apply").onclick = applySim;
+  $("reset-counts").onclick = () => send({ type: "reset_counts" });
+  connectWS();
+  setInterval(poll, 2000);
+  setInterval(() => { if (lastFrame) drawChart(); }, 1000);
+});
+</script>
+</body>
+</html>

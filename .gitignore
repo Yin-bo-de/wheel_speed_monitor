@@ -1,0 +1,10 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+secrets.h
+tests/native/build/
+__pycache__/
+*.pyc
+.cache/
+
