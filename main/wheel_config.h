@@ -45,7 +45,8 @@ extern "C" {
 #define WHEEL_CALC_STACK 4096
 #define WHEEL_WS_PUSH_CORE 0
 #define WHEEL_WS_PUSH_PRIO 15
-#define WHEEL_WS_PUSH_STACK 4096
+/* 栈 8192：任务内帧缓冲 2048 + snprintf/WS/WiFi 调用面（4096 实测栈溢出） */
+#define WHEEL_WS_PUSH_STACK 8192
 #define WHEEL_HTTPD_CORE 1
 #define WHEEL_HTTPD_STACK 8192
 

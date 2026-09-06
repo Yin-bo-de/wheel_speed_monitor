@@ -50,7 +50,9 @@ esp_err_t wheel_sensor_init(const uint8_t gpios[WHEEL_SENSOR_COUNT])
     if (gpios == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    memcpy(s_gpios, gpios, sizeof(s_gpios)); /* 板级映射在 init 时固化 */
+    for (int i = 0; i < WHEEL_SENSOR_COUNT; i++) {
+        s_gpios[i] = gpios[i]; /* 逐个赋值：gpios 是 uint8_t，不能 memcpy 进 int[] */
+    }
     for (int i = 0; i < WHEEL_SENSOR_COUNT; i++) {
         ESP_RETURN_ON_ERROR(init_gpio((uint8_t)i), TAG, "err");
 

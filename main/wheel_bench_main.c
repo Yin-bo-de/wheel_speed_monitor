@@ -206,14 +206,8 @@ static void wifi_ap_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    esp_netif_ip_info_t ip = {
-        .ip = {.addr = ESP_IP4TOADDR(192, 168, 4, 1)},
-        .gw = {.addr = ESP_IP4TOADDR(192, 168, 4, 1)},
-        .netmask = {.addr = ESP_IP4TOADDR(255, 255, 255, 0)},
-    };
-    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("ESP_NETIF_DEFAULT_AP");
-    ESP_ERROR_CHECK(esp_netif_set_ip_info(ap_netif, &ip));
-
+    /* create_default_wifi_ap() 已默认 DHCP server 192.168.4.1，勿再 set_ip_info
+     * （会因 DHCP 已启动返回 ESP_ERR_INVALID_STATE） */
     ESP_LOGI(TAG, "WiFi AP up: %s @ %s", WHEEL_AP_SSID, WHEEL_AP_IP);
 }
 
@@ -246,11 +240,6 @@ void app_main(void)
     esp_err_t e = telem_register(&s_wheel_ops, NULL);
     ESP_LOGI(TAG, "telemetry register: %d", e);
 
-    xTaskCreatePinnedToCore(sampler_task, "sampler", WHEEL_SAMPLER_STACK, NULL,
-                            WHEEL_SAMPLER_PRIO, NULL, WHEEL_SAMPLER_CORE);
-    xTaskCreatePinnedToCore(ws_push_task, "ws_push", WHEEL_WS_PUSH_STACK, NULL,
-                            WHEEL_WS_PUSH_PRIO, NULL, WHEEL_WS_PUSH_CORE);
-
     wifi_ap_start();
 
     bench_server_ctx_t ctx = {
@@ -259,4 +248,10 @@ void app_main(void)
         .units = s_units,
     };
     ESP_ERROR_CHECK(bench_http_server_start(&ctx));
+
+    /* httpd 与 mutex 就绪后再起推送任务，避免 xSemaphoreTake(NULL) */
+    xTaskCreatePinnedToCore(sampler_task, "sampler", WHEEL_SAMPLER_STACK, NULL,
+                            WHEEL_SAMPLER_PRIO, NULL, WHEEL_SAMPLER_CORE);
+    xTaskCreatePinnedToCore(ws_push_task, "ws_push", WHEEL_WS_PUSH_STACK, NULL,
+                            WHEEL_WS_PUSH_PRIO, NULL, WHEEL_WS_PUSH_CORE);
 }

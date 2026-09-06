@@ -16,16 +16,24 @@ esp_err_t config_store_load(cfg_params_t *out)
     cfg_params_default(out);
 
     nvs_handle_t h;
-    ESP_RETURN_ON_ERROR(nvs_open(CFG_NS, NVS_READONLY, &h), TAG, "err");
+    esp_err_t e = nvs_open(CFG_NS, NVS_READONLY, &h);
+    if (e == ESP_ERR_NVS_NOT_FOUND) {
+        /* 命名空间首次不存在（新分区/首次上电）→ 默认值并回写 */
+        ESP_LOGI(TAG, "first boot: writing default config to NVS");
+        return config_store_save(out);
+    }
+    if (e != ESP_OK) {
+        return e;
+    }
     uint8_t blob[CFG_PARAMS_BLOB_SIZE];
     size_t len = sizeof(blob);
-    esp_err_t e = nvs_get_blob(h, CFG_KEY, blob, &len);
+    e = nvs_get_blob(h, CFG_KEY, blob, &len);
     nvs_close(h);
     if (e == ESP_OK) {
         return cfg_params_unpack(blob, len, out);
     }
     if (e == ESP_ERR_NVS_NOT_FOUND) {
-        /* 无记录 → 默认值并回写，让后续修改有可对比的基线 */
+        /* 键不存在（namespace 存在但没写过）→ 默认值并回写 */
         return config_store_save(out);
     }
     return e;

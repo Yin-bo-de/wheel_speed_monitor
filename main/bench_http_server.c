@@ -332,6 +332,10 @@ static esp_err_t handle_any(httpd_req_t *req)
 
 esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
 {
+    /* mutex 必须在广播任务可能运行前就创建：
+     * app_main 先 start（创建 mutex + httpd）再启动 ws_push_task，否则
+     * 任务先跑会 xSemaphoreTake(NULL) 触发 assert（LoadProhibited 属于次生）。
+     * 若想彻底解耦，可改由 app_main 预先创建并传入；此处按调用顺序保证。 */
     s_ctx = ctx;
     s_frame_mutex = xSemaphoreCreateMutex();
     s_clients_mutex = xSemaphoreCreateMutex();
