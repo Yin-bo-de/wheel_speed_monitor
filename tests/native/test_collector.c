@@ -1,4 +1,6 @@
-/* wheel_speed_collector 行为测试：计数差值、16 位回绕/复位判定、累计、换源重置、去抖。 */
+/* wheel_speed_collector 行为测试：计数差值、16 位回绕/复位判定、累计、换源重置、去抖、
+ * 脉冲间隔测频。 */
+#include <math.h>
 #include <string.h>
 #include "unity.h"
 #include "unity_runner.h"
@@ -142,6 +144,33 @@ static void test_reset_counts(void)
     TEST_ASSERT_EQUAL_UINT32(5, st.pulses_total);
 }
 
+/* 10. 脉冲间隔测频法：间隔 1000000us（1s）→ 频率 1Hz → RPS 1；实时非窗口放大 */
+static void test_period_measurement_freq(void)
+{
+    fresh();
+    wheel_chan_sample_period(&st, &cfg, 1000000u, 1000);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 1.0f, st.math.freq_hz);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 60.0f, st.math.rpm_ema);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 1.0f, st.math.rpm_ema / 60.0f);
+}
+
+/* 11. 快速脉冲间隔（100ms → 10Hz）→ 10 RPS，窗口法在单窗口会误报 20Hz */
+static void test_period_measurement_fast(void)
+{
+    fresh();
+    wheel_chan_sample_period(&st, &cfg, 100000u, 1000);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 10.0f, st.math.freq_hz);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
+}
+
+/* 12. 间隔为零（中断异常/未检测）→ 返回错误且不产生 NaN */
+static void test_period_zero_interval(void)
+{
+    fresh();
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, wheel_chan_sample_period(&st, &cfg, 0, 1000));
+    TEST_ASSERT_TRUE(isfinite(st.math.freq_hz));
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_normal_increment, "test_normal_increment", __LINE__);
     UnityDefaultTestRun(test_wraparound, "test_wraparound", __LINE__);
@@ -153,4 +182,7 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_debounce_zero_counts_all, "test_debounce_zero_counts_all", __LINE__);
     UnityDefaultTestRun(test_debounce_drops_second_pulse, "test_debounce_drops_second_pulse", __LINE__);
     UnityDefaultTestRun(test_reset_counts, "test_reset_counts", __LINE__);
+    UnityDefaultTestRun(test_period_measurement_freq, "test_period_measurement_freq", __LINE__);
+    UnityDefaultTestRun(test_period_measurement_fast, "test_period_measurement_fast", __LINE__);
+    UnityDefaultTestRun(test_period_zero_interval, "test_period_zero_interval", __LINE__);
 )

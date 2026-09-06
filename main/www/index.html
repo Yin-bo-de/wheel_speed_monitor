@@ -109,9 +109,9 @@ function buildPanels() {
     const div = document.createElement("div");
     div.className = "card wheel";
     div.innerHTML = `
-      <div class="name"><span><span class="trigger" id="trig${i}"></span> ${wheelNames[i]}</span><span class="note" id="en${i}"></span></div>
-      <div class="rpm" id="rpm${i}">0.0 <small>RPM</small></div>
-      <div class="row"><span>线速度</span><b id="spd${i}">0.0</b></div>
+      <div class="name"><span><span class="trigger" id="trig${i}"></span> ${wheelNames[i]}</span><span class="note" id="en-note${i}"></span></div>
+      <div class="rpm" id="rpm${i}">0.00 <small>转/秒</small></div>
+      <div class="row"><span>RPM</span><b id="rpmraw${i}">0</b><span>线速度</span><b id="spd${i}">0.0</b></div>
       <div class="row"><span>频率</span><b id="freq${i}">0.000 Hz</b></div>
       <div class="row"><span>累计脉冲</span><b id="pulses${i}">0</b></div>`;
     wheels.appendChild(div);
@@ -176,12 +176,13 @@ function applyFrame(f) {
   $("sim-toggle").checked = !!cfg.sim;
   cfg.sim_rpm && cfg.sim_rpm.forEach((v, i) => { $("sim" + i).value = v; });
   wheels.wheels.forEach((w, i) => {
-    $("rpm" + i).innerHTML = fmt(w.rpm, 1) + " <small>RPM</small>";
+    $("rpm" + i).innerHTML = fmt(w.rps, 2) + " <small>转/秒</small>";
+    $("rpmraw" + i).textContent = fmt(w.rpm, 0) + " RPM";
     $("spd" + i).textContent = fmt(w.speed_cms, 0) + " cm/s";
     $("freq" + i).textContent = fmt(w.freq, 3) + " Hz";
     $("pulses" + i).textContent = w.pulses ?? 0;
     $("trig" + i).className = "trigger" + (w.trigger ? " on" : "");
-    $("en" + i).textContent = w.en ? "" : "(禁用)";
+    $("en-note" + i).textContent = w.en ? "" : "(禁用)";
   });
   const t = f.t || 0;
   hist.t.push(t);

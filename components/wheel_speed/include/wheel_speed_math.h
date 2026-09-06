@@ -38,6 +38,15 @@ esp_err_t wsmath_update(wsmath_state_t *st, uint32_t pulses_this_window,
                         uint32_t window_ms, uint32_t magnets,
                         uint32_t wheel_diam_mm, float alpha, uint32_t now_ms);
 
+/*
+ * 脉冲间隔测频版：interval_us 为相邻两次脉冲间隔（微秒）。
+ * 频率 = 1e6/interval_us，EMA 平滑；0 间隔返回 ESP_ERR_INVALID_ARG（不产生 NaN）。
+ * 用于低速实时观测：低速（1Hz 级）时窗口法会跳 0/20Hz，间隔法直接反映真实转速。
+ */
+esp_err_t wsmath_update_period(wsmath_state_t *st, uint32_t interval_us,
+                               uint32_t magnets, uint32_t wheel_diam_mm,
+                               float alpha, uint32_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

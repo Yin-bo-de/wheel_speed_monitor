@@ -57,7 +57,7 @@ esp_err_t wheel_bench_apply_config(const cfg_params_t *cfg)
             if (cfg->sim_on) {
                 c = sim_source_counter(&s_units[i].sim, (uint8_t)i);
             } else {
-                wheel_sensor_read_count((uint8_t)i, &c);
+                wheel_sensor_get_valid_count((uint8_t)i, &c);
             }
             wheel_chan_reset_baseline(&s_units[i].chan, c);
         } else {
@@ -74,15 +74,25 @@ static esp_err_t wheel_collector_sample(void *ctx, uint32_t now_ms)
         if (!s_cfg.wheel_enabled[i]) {
             continue;
         }
-        uint16_t c = 0;
         if (s_cfg.sim_on) {
             sim_source_set_target_rpm(&s_units[i].sim, (uint8_t)i, s_cfg.sim_rpm[i]);
             sim_source_step(&s_units[i].sim, WHEEL_SAMPLE_MS);
-            c = sim_source_counter(&s_units[i].sim, (uint8_t)i);
+            uint16_t c = sim_source_counter(&s_units[i].sim, (uint8_t)i);
+            wheel_chan_sample(&s_units[i].chan, &s_chan_cfg, c, now_ms);
         } else {
-            wheel_sensor_read_count((uint8_t)i, &c);
+            /* 真实源：先间隔法（低速实时），无新脉冲时用窗口法累计。
+             * 计数用 ISR 维护的有效计数（去抖后），避免 PCNT 原始计数
+             * 被磁铁贴近抖动污染成百地增加。 */
+            uint32_t interval_us = 0;
+            wheel_sensor_get_period_us((uint8_t)i, &interval_us);
+            if (interval_us > 0) {
+                wheel_chan_sample_period(&s_units[i].chan, &s_chan_cfg, interval_us, now_ms);
+            }
+            uint16_t c = 0;
+            wheel_sensor_get_valid_count((uint8_t)i, &c);
+            /* 间隔法更新频率/RPM；窗口法仍用于累计脉冲与空闲时归零 */
+            wheel_chan_sample(&s_units[i].chan, &s_chan_cfg, c, now_ms);
         }
-        wheel_chan_sample(&s_units[i].chan, &s_chan_cfg, c, now_ms);
     }
     return ESP_OK;
 }
@@ -101,7 +111,7 @@ static esp_err_t wheel_collector_reset(void *ctx)
         if (s_cfg.sim_on) {
             sim_source_init(&s_units[i].sim);
         } else {
-            wheel_sensor_read_count((uint8_t)i, &c);
+            wheel_sensor_get_valid_count((uint8_t)i, &c);
         }
         wheel_chan_reset_baseline(&s_units[i].chan, c);
     }
@@ -150,21 +160,24 @@ static void ws_push_task(void *arg)
         vTaskDelayUntil(&last, pdMS_TO_TICKS(WHEEL_WS_PUSH_MS));
         uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-        /* 组装各轮显示快照 */
+        /* 组装各轮显示快照：全部写 s_units[0].disp（渲染端固定读它，
+         * 此前误写各 unit 自己的 wheels[i]，导致只有 wheels[0] 有值、
+         * wheels[1..3] 全零→页面显示禁用/0 RPM） */
+        wheel_render_state_t *d = &s_units[0].disp;
+        d->source = s_cfg.sim_on ? WHEEL_RENDER_SRC_SIM : WHEEL_RENDER_SRC_PCNT;
+        d->magnets = s_cfg.magnets;
+        d->wheel_diam_mm = s_cfg.wheel_diam_mm;
+        d->alpha = s_cfg.alpha;
+        d->sim_on = s_cfg.sim_on;
+        for (int j = 0; j < WHEEL_COUNT; j++) {
+            d->sim_rpm[j] = s_cfg.sim_rpm[j];
+        }
         for (int i = 0; i < WHEEL_COUNT; i++) {
             wheel_unit_t *u = &s_units[i];
-            wheel_render_wheel_t *w = &u->disp.wheels[i];
-            wheel_render_state_t *d = &u->disp;
-            d->source = s_cfg.sim_on ? WHEEL_RENDER_SRC_SIM : WHEEL_RENDER_SRC_PCNT;
-            d->magnets = s_cfg.magnets;
-            d->wheel_diam_mm = s_cfg.wheel_diam_mm;
-            d->alpha = s_cfg.alpha;
-            d->sim_on = s_cfg.sim_on;
-            for (int j = 0; j < WHEEL_COUNT; j++) {
-                d->sim_rpm[j] = s_cfg.sim_rpm[j];
-            }
+            wheel_render_wheel_t *w = &d->wheels[i];
             w->enabled = s_cfg.wheel_enabled[i];
             w->rpm = u->chan.math.rpm_ema;
+            w->rps = u->chan.math.rpm_ema / 60.0f;
             w->speed_cm_s = u->chan.math.speed_cm_s;
             w->speed_km_h = u->chan.math.speed_km_h;
             w->freq_hz = u->chan.math.freq_hz;
@@ -219,6 +232,11 @@ void app_main(void)
     ESP_ERROR_CHECK(config_store_load(&cfg));
     s_cfg = cfg;
     s_cfg_mutex = xSemaphoreCreateMutex();
+    ESP_LOGI(TAG, "config: magnets=%lu diam=%lu alpha=%.2f en=[%d,%d,%d,%d] sim=%d",
+             (unsigned long)cfg.magnets, (unsigned long)cfg.wheel_diam_mm,
+             (double)cfg.alpha,
+             cfg.wheel_enabled[0], cfg.wheel_enabled[1],
+             cfg.wheel_enabled[2], cfg.wheel_enabled[3], cfg.sim_on);
 
     /* collector 配置快照 */
     s_chan_cfg.window_ms = WHEEL_SAMPLE_MS;
@@ -234,6 +252,7 @@ void app_main(void)
     for (int i = 0; i < WHEEL_COUNT; i++) {
         sim_source_init(&s_units[i].sim);
         memset(&s_units[i].disp, 0, sizeof(s_units[i].disp));
+        s_units[i].chan.use_period = true; /* 间隔法维护频率/RPM，窗口法只累计 */
     }
 
     /* 注册 wheel 采集器到 telemetry 框架 */

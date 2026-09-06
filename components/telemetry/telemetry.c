@@ -97,7 +97,9 @@ esp_err_t telem_render_frame(char *buf, size_t len, size_t *used,
         if (!g_slots[i].in_use || g_slots[i].render == NULL) {
             continue;
         }
-        char block[512];
+        char block[1024]; /* 单个采集器块缓冲：轮速块随字段增长（rps 后约 541B），
+                           与 telem_render_frame 的帧缓冲/采集器协议一起定 */
+
         size_t blk_used = 0;
         esp_err_t e = g_slots[i].render(g_slots[i].ctx, block, sizeof(block), &blk_used);
         if (e != ESP_OK) {

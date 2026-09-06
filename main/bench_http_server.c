@@ -222,47 +222,55 @@ static void handle_reset_counts(void)
     xSemaphoreGive(s_ctx->cfg_mutex);
 }
 
-/* WS 消息处理（receiving frame）：文本命令 */
+/* WS 处理（is_websocket=true 注册）：握手后每次收帧调用。
+ * req->method == HTTP_GET 表示握手完成（客户端刚连上），此时注册 fd 到广播表；
+ * 其余是数据帧，解析文本命令（与官方 ws_echo_server 生命周期一致）。 */
 static esp_err_t ws_handler(httpd_req_t *req)
 {
+    if (req->method == HTTP_GET) {
+        int fd = httpd_req_to_sockfd(req);
+        ws_client_register(fd);
+        ESP_LOGI(TAG, "WS client connected fd=%d", fd);
+        return ESP_OK;
+    }
+
     httpd_ws_frame_t frame;
     memset(&frame, 0, sizeof(frame));
     frame.type = HTTPD_WS_TYPE_TEXT;
-    if (httpd_ws_recv_frame(req, &frame, 0) != ESP_OK) {
+    /* 先取长度 */
+    esp_err_t ret = httpd_ws_recv_frame(req, &frame, 0);
+    if (ret != ESP_OK) {
         return ESP_FAIL;
     }
     if (frame.len > 256) {
         return ESP_ERR_INVALID_ARG; /* 过大丢弃 */
     }
     char payload[257];
-    httpd_ws_frame_t data = {
-        .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)payload,
-        .len = frame.len,
-    };
-    if (httpd_ws_recv_frame(req, &data, sizeof(payload)) != ESP_OK) {
+    frame.payload = (uint8_t *)payload;
+    ret = httpd_ws_recv_frame(req, &frame, 256);
+    if (ret != ESP_OK) {
         return ESP_FAIL;
     }
     payload[frame.len] = '\0';
     ESP_LOGI(TAG, "WS frame: %s", payload);
 
-    /* 连接获取 fd（用于注册到广播表） */
-    int fd = httpd_req_to_sockfd(req);
-    ws_client_register(fd);
-
     /* 命令路由 */
     cJSON *root = cJSON_Parse(payload);
-    if (root != NULL) {
-        const char *type = cJSON_GetObjectItem(root, "type")->valuestring;
-        if (type && strcmp(type, "set_cfg") == 0) {
+    if (root == NULL) {
+        ESP_LOGW(TAG, "bad ws json");
+        return ESP_OK;
+    }
+    cJSON *jtype = cJSON_GetObjectItem(root, "type");
+    if (jtype != NULL && jtype->valuestring != NULL) {
+        if (strcmp(jtype->valuestring, "set_cfg") == 0) {
             handle_set_cfg(payload);
-        } else if (type && strcmp(type, "reset_counts") == 0) {
+        } else if (strcmp(jtype->valuestring, "reset_counts") == 0) {
             handle_reset_counts();
-        } else if (type && strcmp(type, "get_cfg") == 0) {
+        } else if (strcmp(jtype->valuestring, "get_cfg") == 0) {
             /* cfg 由遥测帧携带，无需专门回包 */
         }
-        cJSON_Delete(root);
     }
+    cJSON_Delete(root);
     return ESP_OK;
 }
 
@@ -312,24 +320,6 @@ void bench_http_server_broadcast(const char *frame, size_t len, uint32_t seq)
     }
 }
 
-/* ---- 任意路径 handler（页面/API） ---- */
-
-static esp_err_t handle_any(httpd_req_t *req)
-{
-    const char *uri = req->uri;
-    if (strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0) {
-        return handle_index(req);
-    }
-    if (strcmp(uri, "/api/status") == 0) {
-        return handle_api_status(req);
-    }
-    if (strcmp(uri, "/ws") == 0) {
-        return ws_handler(req);
-    }
-    httpd_resp_send_404(req);
-    return ESP_FAIL;
-}
-
 esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
 {
     /* mutex 必须在广播任务可能运行前就创建：
@@ -349,6 +339,7 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
 
     httpd_handle_t hd;
     ESP_RETURN_ON_ERROR(httpd_start(&hd, &cfg), TAG, "err");
+    s_server_handle = hd; /* 供 ws_push_task 广播用（此前漏赋值导致广播空转） */
 
     httpd_uri_t uri = {
         .uri = "/",
@@ -366,7 +357,8 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
 
     uri.uri = "/ws";
     uri.method = HTTP_GET;
-    uri.handler = handle_any; /* WS 握手 + on_msg 由 handle_any 判定 */
+    uri.handler = ws_handler;
+    uri.is_websocket = true;
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(hd, &uri), TAG, "err");
 
     ESP_LOGI(TAG, "httpd up; page http://%s/", WHEEL_AP_IP);

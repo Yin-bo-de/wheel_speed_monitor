@@ -36,6 +36,7 @@ typedef struct {
     wsmath_state_t math;          /* 数学层状态（EMA/频率/线速度） */
     bool trigger;                 /* 本窗口是否有脉冲增量 */
     bool has_baseline;            /* 是否已建立首窗口基准 */
+    bool use_period;              /* true = 频率由间隔法维护（低速率准），窗口法只累计 */
 } wheel_chan_state_t;
 
 /*
@@ -51,6 +52,15 @@ esp_err_t wheel_chan_sample(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
  * 不清累计脉冲与 EMA 历史。
  */
 void wheel_chan_reset_baseline(wheel_chan_state_t *st, uint16_t current_counter);
+
+/*
+ * 脉冲间隔测频法：interval_us 为相邻两次脉冲的时间间隔（微秒）。
+ * 频率 = 1e6/interval_us（Hz），RPM = 频率×60/磁铁数，走 EMA。
+ * 相比窗口计数法（单窗口 1 脉冲恒报 20Hz），间隔法低速也能平滑、
+ * 实时反映真实转速；间隔为 0 返回 ESP_ERR_INVALID_ARG 且状态不变。
+ */
+esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
+                                   uint32_t interval_us, uint32_t now_ms);
 
 /* 清零累计脉冲（网页 reset_counts 命令），基准保留。 */
 void wheel_chan_reset_counts(wheel_chan_state_t *st);

@@ -27,7 +27,7 @@ static void fresh(void)
 static void test_all_required_fields(void)
 {
     fresh();
-    char buf[512];
+    char buf[600];
     size_t used = 0;
     TEST_ASSERT_EQUAL_INT(ESP_OK, wheel_render_block(&rs, buf, sizeof(buf), &used));
     assert_contains(buf, "\"type\":\"wheel_speed\"");
@@ -50,7 +50,7 @@ static void test_float_format_fixed(void)
     rs.alpha = 0.3f;
     rs.wheels[0].rpm = 42.37f;
     rs.wheels[0].speed_cm_s = 3.456f;
-    char buf[512];
+    char buf[600];
     size_t used = 0;
     wheel_render_block(&rs, buf, sizeof(buf), &used);
     assert_contains(buf, "\"rpm\":42.4");
@@ -62,7 +62,7 @@ static void test_disabled_wheel_zero_output(void)
 {
     fresh();
     rs.wheels[0].enabled = false;
-    char buf[512];
+    char buf[600];
     size_t used = 0;
     wheel_render_block(&rs, buf, sizeof(buf), &used);
     /* 渲染 4 轮；禁用轮 rpm 为 0.0 */
@@ -84,12 +84,23 @@ static void test_deterministic_render(void)
     fresh();
     rs.magnets = 2;
     rs.wheels[1].pulses = 123456;
-    char b1[512], b2[512];
+    char b1[600], b2[600];
     size_t u1 = 0, u2 = 0;
     wheel_render_block(&rs, b1, sizeof(b1), &u1);
     wheel_render_block(&rs, b2, sizeof(b2), &u2);
     TEST_ASSERT_EQUAL_INT(u1, u2);
     TEST_ASSERT_EQUAL_STRING(b1, b2);
+}
+
+/* 6. RPS 字段渲染（转/秒，固定小数位） */
+static void test_rps_rendered(void)
+{
+    fresh();
+    rs.wheels[0].rps = 4.5f;
+    char buf[600];
+    size_t used = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, wheel_render_block(&rs, buf, sizeof(buf), &used));
+    assert_contains(buf, "\"rps\":4.5");
 }
 
 NATIVE_TEST_MAIN(
@@ -98,4 +109,5 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_disabled_wheel_zero_output, "test_disabled_wheel_zero_output", __LINE__);
     UnityDefaultTestRun(test_buffer_too_small, "test_buffer_too_small", __LINE__);
     UnityDefaultTestRun(test_deterministic_render, "test_deterministic_render", __LINE__);
+    UnityDefaultTestRun(test_rps_rendered, "test_rps_rendered", __LINE__);
 )

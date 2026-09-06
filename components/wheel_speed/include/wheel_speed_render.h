@@ -25,7 +25,8 @@ typedef enum {
 
 typedef struct {
     bool enabled;        /* 该轮是否启用 */
-    float rpm;           /* EMA 滤波后转速 */
+    float rpm;           /* EMA 滤波后转速（转/分） */
+    float rps;           /* EMA 滤波后转速（转/秒）= rpm/60，实时观测更直观 */
     float speed_cm_s;    /* 线速度 cm/s */
     float speed_km_h;    /* 线速度 km/h */
     float freq_hz;       /* 脉冲频率 */

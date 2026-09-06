@@ -21,6 +21,14 @@ extern "C" {
 /* 初始化 4 个 PCNT 单元。gpios 是各轮霍尔输入 GPIO 号（长度 WHEEL_SENSOR_COUNT）。 */
 esp_err_t wheel_sensor_init(const uint8_t gpios[WHEEL_SENSOR_COUNT]);
 
+/* 读某轮最近两次"有效"脉冲间隔（微秒）；0 表示从未检测到有效脉冲。
+ * 由 GPIO 下降沿中断维护（PCNT 计数与 GPIO 中断共存同一引脚）。
+ * 有效 = 间隔 >= 5ms（去抖，剔除磁铁贴近时的抖动/双探针）。 */
+esp_err_t wheel_sensor_get_period_us(uint8_t wheel, uint32_t *interval_us);
+
+/* 读某轮有效脉冲总数（去抖后，替代被抖污染 的 PCNT 原始计数做累计显示）。 */
+esp_err_t wheel_sensor_get_valid_count(uint8_t wheel, uint16_t *count);
+
 /* 读某轮当前 PCNT 计数值（16 位回绕由采集器判定）。 */
 esp_err_t wheel_sensor_read_count(uint8_t wheel, uint16_t *count);
 

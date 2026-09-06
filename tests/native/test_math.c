@@ -137,6 +137,23 @@ static void test_zero_window_rejected(void)
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, wsmath_update(&st, 1, 0, 1, 100, 0.3f, 1000));
 }
 
+/* 11. 脉冲间隔测频：1s 间隔 → 1Hz；100ms → 10Hz；0 间隔报错不产生 NaN */
+static void test_period_freq(void)
+{
+    fresh_state();
+    TEST_ASSERT_EQUAL_INT(ESP_OK, wsmath_update_period(&st, 1000000u, 1, 100, 0.9f, 1000));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.freq_hz);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 60.0f, st.rpm_ema);
+
+    fresh_state();
+    TEST_ASSERT_EQUAL_INT(ESP_OK, wsmath_update_period(&st, 100000u, 1, 100, 0.9f, 1000));
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 10.0f, st.freq_hz);
+
+    fresh_state();
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, wsmath_update_period(&st, 0, 1, 100, 0.9f, 1000));
+    TEST_ASSERT_TRUE(isfinite(st.freq_hz));
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_freq_calc, "test_freq_calc", __LINE__);
     UnityDefaultTestRun(test_rpm_magnet_division, "test_rpm_magnet_division", __LINE__);
@@ -149,4 +166,5 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_idle_timeout_zeroes, "test_idle_timeout_zeroes", __LINE__);
     UnityDefaultTestRun(test_revive_after_idle, "test_revive_after_idle", __LINE__);
     UnityDefaultTestRun(test_zero_window_rejected, "test_zero_window_rejected", __LINE__);
+    UnityDefaultTestRun(test_period_freq, "test_period_freq", __LINE__);
 )
