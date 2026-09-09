@@ -75,12 +75,18 @@ static esp_err_t wheel_collector_sample(void *ctx, uint32_t now_ms)
             continue;
         }
         if (s_cfg.sim_on) {
+            /* 模拟源：sim_source 产出跨窗口正确间隔，与真实源走同一间隔法链 */
             sim_source_set_target_rpm(&s_units[i].sim, (uint8_t)i, s_cfg.sim_rpm[i]);
             sim_source_step(&s_units[i].sim, WHEEL_SAMPLE_MS);
+            uint32_t interval_us = sim_source_period_us(&s_units[i].sim, (uint8_t)i);
+            if (interval_us > 0) {
+                wheel_chan_sample_period(&s_units[i].chan, &s_chan_cfg, interval_us, now_ms);
+            }
             uint16_t c = sim_source_counter(&s_units[i].sim, (uint8_t)i);
+            /* sample 只累计脉冲 + 静止归零兜底，不计算频率 */
             wheel_chan_sample(&s_units[i].chan, &s_chan_cfg, c, now_ms);
         } else {
-            /* 真实源：先间隔法（低速实时），无新脉冲时用窗口法累计。
+            /* 真实源：先间隔法（更新频率/RPM/EMA），再 sample（累计+静止归零）。
              * 计数用 ISR 维护的有效计数（去抖后），避免 PCNT 原始计数
              * 被磁铁贴近抖动污染成百地增加。 */
             uint32_t interval_us = 0;
@@ -90,7 +96,6 @@ static esp_err_t wheel_collector_sample(void *ctx, uint32_t now_ms)
             }
             uint16_t c = 0;
             wheel_sensor_get_valid_count((uint8_t)i, &c);
-            /* 间隔法更新频率/RPM；窗口法仍用于累计脉冲与空闲时归零 */
             wheel_chan_sample(&s_units[i].chan, &s_chan_cfg, c, now_ms);
         }
     }
@@ -252,7 +257,6 @@ void app_main(void)
     for (int i = 0; i < WHEEL_COUNT; i++) {
         sim_source_init(&s_units[i].sim);
         memset(&s_units[i].disp, 0, sizeof(s_units[i].disp));
-        s_units[i].chan.use_period = true; /* 间隔法维护频率/RPM，窗口法只累计 */
     }
 
     /* 注册 wheel 采集器到 telemetry 框架 */

@@ -148,6 +148,54 @@ static void test_target_change_converges(void)
     TEST_ASSERT_UINT32_WITHIN(1, 205, total);
 }
 
+/* 8. 间隔产出：60 RPM（1 RPS）跨 20 个 50ms 窗口才出 1 脉冲。
+ * 首次 emit 只设基准（与真实 ISR 对齐），第二次 emit 才产间隔。
+ * 间隔应如实反映 1s 周期（而非单窗口的 50ms 倍频） */
+static void test_period_reflects_cross_window_span(void)
+{
+    fresh();
+    sim_source_set_target_rpm(&sim, 0, 60.0f); /* 1 RPS */
+    for (int i = 0; i < 20; i++) {
+        sim_source_step(&sim, 50);
+    }
+    /* 第 20 窗口首次 emit，只设基准，period 仍为 0 */
+    TEST_ASSERT_EQUAL_UINT32(1, sim_source_counter(&sim, 0));
+    TEST_ASSERT_EQUAL_UINT32(0, sim_source_period_us(&sim, 0));
+    /* 再跑 20 窗口到第二次 emit，span = 20×50ms = 1000000us */
+    for (int i = 0; i < 20; i++) {
+        sim_source_step(&sim, 50);
+    }
+    TEST_ASSERT_EQUAL_UINT32(1000000u, sim_source_period_us(&sim, 0));
+}
+
+/* 9. 高速 1200 RPM：每窗口 1 脉冲。首次只设基准，第二次 emit 间隔 = 50ms → 20Hz */
+static void test_period_high_speed(void)
+{
+    fresh();
+    sim_source_set_target_rpm(&sim, 0, 1200.0f);
+    sim_source_step(&sim, 50); /* 首次 emit，只设基准 */
+    TEST_ASSERT_EQUAL_UINT32(0, sim_source_period_us(&sim, 0));
+    sim_source_step(&sim, 50); /* 第二次 emit，span = 50ms */
+    TEST_ASSERT_EQUAL_UINT32(50000u, sim_source_period_us(&sim, 0));
+}
+
+/* 10. 停转过期：建立间隔后停转，超过 1.5×周期后 period 返回 0 */
+static void test_period_expires_after_stop(void)
+{
+    fresh();
+    sim_source_set_target_rpm(&sim, 0, 1200.0f); /* 20Hz, 间隔 50ms */
+    sim_source_step(&sim, 50); /* 首次 emit，只设基准 */
+    sim_source_step(&sim, 50); /* 第二次 emit，period=50000 */
+    TEST_ASSERT_EQUAL_UINT32(50000u, sim_source_period_us(&sim, 0));
+    /* 停转：target=0，继续 step 不 emit，since 持续增长 */
+    sim_source_set_target_rpm(&sim, 0, 0.0f);
+    /* 1.5×50000=75000us = 1.5 窗口；2 个窗口后 since=100000 > 75000 → 过期 */
+    sim_source_step(&sim, 50); /* since=50000，未过期 */
+    TEST_ASSERT_EQUAL_UINT32(50000u, sim_source_period_us(&sim, 0));
+    sim_source_step(&sim, 50); /* since=100000 > 75000，过期 */
+    TEST_ASSERT_EQUAL_UINT32(0, sim_source_period_us(&sim, 0));
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_low_rpm_accumulates_across_windows, "test_low_rpm_accumulates_across_windows", __LINE__);
     UnityDefaultTestRun(test_integer_pulse_per_window, "test_integer_pulse_per_window", __LINE__);
@@ -156,4 +204,7 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_channels_accumulated_proportions, "test_channels_accumulated_proportions", __LINE__);
     UnityDefaultTestRun(test_counter_never_exceeds_u16, "test_counter_never_exceeds_u16", __LINE__);
     UnityDefaultTestRun(test_target_change_converges, "test_target_change_converges", __LINE__);
+    UnityDefaultTestRun(test_period_reflects_cross_window_span, "test_period_reflects_cross_window_span", __LINE__);
+    UnityDefaultTestRun(test_period_high_speed, "test_period_high_speed", __LINE__);
+    UnityDefaultTestRun(test_period_expires_after_stop, "test_period_expires_after_stop", __LINE__);
 )

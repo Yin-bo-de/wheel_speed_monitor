@@ -7,7 +7,7 @@ void cfg_params_default(cfg_params_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->magnets = 1;
-    cfg->wheel_diam_mm = 100;
+    cfg->wheel_diam_mm = 105;
     cfg->alpha = 0.3f;
     for (int i = 0; i < CFG_WHEEL_COUNT; i++) {
         cfg->wheel_enabled[i] = true;

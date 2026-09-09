@@ -1,5 +1,5 @@
 /* wheel_speed_collector 行为测试：计数差值、16 位回绕/复位判定、累计、换源重置、去抖、
- * 脉冲间隔测频。 */
+ * 脉冲间隔测频、静止归零兜底。 */
 #include <math.h>
 #include <string.h>
 #include "unity.h"
@@ -58,7 +58,7 @@ static void test_clear_reset(void)
     TEST_ASSERT_EQUAL_UINT32(5, st.pulses_total);
 }
 
-/* 4. 全零序列：RPM=0、无触发、无错误 */
+/* 4. 全零序列：无触发、无累计、math 保持初始 0 */
 static void test_all_zero_sequence(void)
 {
     fresh();
@@ -70,21 +70,7 @@ static void test_all_zero_sequence(void)
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.freq_hz);
 }
 
-/* 5. 链路正确性：每窗口 1 脉冲、1 磁铁、50ms → 20Hz → 1200 RPM */
-static void test_pipeline_correctness(void)
-{
-    fresh();
-    /* 建立基准 */
-    wheel_chan_sample(&st, &cfg, 0, 1000);
-    for (int i = 1; i <= 10; i++) {
-        wheel_chan_sample(&st, &cfg, i, 1000 + i * 50);
-    }
-    TEST_ASSERT_TRUE(st.trigger);
-    TEST_ASSERT_FLOAT_WITHIN(0.5f, 20.0f, st.math.freq_hz);
-    TEST_ASSERT_FLOAT_WITHIN(0.5f, 1200.0f, st.math.rpm_ema);
-}
-
-/* 6. 累计脉冲跨多次回绕单调递增不丢数 */
+/* 5. 累计脉冲跨多次回绕单调递增不丢数 */
 static void test_pulses_monotonic_across_wraps(void)
 {
     fresh();
@@ -96,7 +82,7 @@ static void test_pulses_monotonic_across_wraps(void)
     TEST_ASSERT_EQUAL_UINT32(636 + 100 + 64800 + 586, st.pulses_total);
 }
 
-/* 7. 换源基准重置：reset_baseline 后首窗口不产生巨大差值 */
+/* 6. 换源基准重置：reset_baseline 后首窗口不产生巨大差值 */
 static void test_reset_baseline_no_glitch(void)
 {
     fresh();
@@ -110,7 +96,7 @@ static void test_reset_baseline_no_glitch(void)
     TEST_ASSERT_EQUAL_UINT32(2, st.pulses_total);
 }
 
-/* 8. 去抖：默认 0 关闭时脉冲全部计数；设 20ms 时同窗口第二脉冲被丢弃 */
+/* 7. 去抖：默认 0 关闭时脉冲全部计数；设 20ms 时同窗口第二脉冲被丢弃 */
 static void test_debounce_zero_counts_all(void)
 {
     fresh();
@@ -130,7 +116,7 @@ static void test_debounce_drops_second_pulse(void)
     TEST_ASSERT_EQUAL_UINT32(1, st.pulses_total);
 }
 
-/* 9. reset 清零累计（前端 reset_counts 命令） */
+/* 8. reset 清零累计（前端 reset_counts 命令） */
 static void test_reset_counts(void)
 {
     fresh();
@@ -144,7 +130,7 @@ static void test_reset_counts(void)
     TEST_ASSERT_EQUAL_UINT32(5, st.pulses_total);
 }
 
-/* 10. 脉冲间隔测频法：间隔 1000000us（1s）→ 频率 1Hz → RPS 1；实时非窗口放大 */
+/* 9. 脉冲间隔测频法：间隔 1000000us（1s）→ 频率 1Hz → 60 RPM → 1 RPS */
 static void test_period_measurement_freq(void)
 {
     fresh();
@@ -154,7 +140,7 @@ static void test_period_measurement_freq(void)
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 1.0f, st.math.rpm_ema / 60.0f);
 }
 
-/* 11. 快速脉冲间隔（100ms → 10Hz）→ 10 RPS，窗口法在单窗口会误报 20Hz */
+/* 10. 快速脉冲间隔（100ms → 10Hz）→ 10 RPS → 600 RPM */
 static void test_period_measurement_fast(void)
 {
     fresh();
@@ -163,7 +149,7 @@ static void test_period_measurement_fast(void)
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
 }
 
-/* 12. 间隔为零（中断异常/未检测）→ 返回错误且不产生 NaN */
+/* 11. 间隔为零（中断异常/未检测）→ 返回错误且不产生 NaN */
 static void test_period_zero_interval(void)
 {
     fresh();
@@ -171,12 +157,44 @@ static void test_period_zero_interval(void)
     TEST_ASSERT_TRUE(isfinite(st.math.freq_hz));
 }
 
+/* 12. 静止归零兜底：有脉冲后长期无脉冲 → math 全字段清零 */
+static void test_idle_timeout_zeroes(void)
+{
+    fresh();
+    /* 先用间隔法建立转速 */
+    wheel_chan_sample_period(&st, &cfg, 100000u, 1000); /* 10Hz → 600 RPM */
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
+    /* 计数也递增一下，建立 last_pulse_ms */
+    wheel_chan_sample(&st, &cfg, 1, 1000);
+    /* 长期无脉冲（超过 2000ms），sample 兜底归零 */
+    wheel_chan_sample(&st, &cfg, 1, 3100);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.rpm_ema);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.speed_cm_s);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.speed_km_h);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.freq_hz);
+    TEST_ASSERT_FALSE(st.math.has_sample);
+}
+
+/* 13. 归零后恢复脉冲：首样本直采（不缓升） */
+static void test_revive_after_idle(void)
+{
+    fresh();
+    wheel_chan_sample_period(&st, &cfg, 100000u, 1000); /* 600 RPM */
+    wheel_chan_sample(&st, &cfg, 1, 1000);
+    /* 静止 */
+    wheel_chan_sample(&st, &cfg, 1, 3100);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.rpm_ema);
+    TEST_ASSERT_FALSE(st.math.has_sample);
+    /* 恢复脉冲：首样本直采，alpha 极小也一步到 600 */
+    wheel_chan_sample_period(&st, &cfg, 100000u, 3150);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_normal_increment, "test_normal_increment", __LINE__);
     UnityDefaultTestRun(test_wraparound, "test_wraparound", __LINE__);
     UnityDefaultTestRun(test_clear_reset, "test_clear_reset", __LINE__);
     UnityDefaultTestRun(test_all_zero_sequence, "test_all_zero_sequence", __LINE__);
-    UnityDefaultTestRun(test_pipeline_correctness, "test_pipeline_correctness", __LINE__);
     UnityDefaultTestRun(test_pulses_monotonic_across_wraps, "test_pulses_monotonic_across_wraps", __LINE__);
     UnityDefaultTestRun(test_reset_baseline_no_glitch, "test_reset_baseline_no_glitch", __LINE__);
     UnityDefaultTestRun(test_debounce_zero_counts_all, "test_debounce_zero_counts_all", __LINE__);
@@ -185,4 +203,6 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_period_measurement_freq, "test_period_measurement_freq", __LINE__);
     UnityDefaultTestRun(test_period_measurement_fast, "test_period_measurement_fast", __LINE__);
     UnityDefaultTestRun(test_period_zero_interval, "test_period_zero_interval", __LINE__);
+    UnityDefaultTestRun(test_idle_timeout_zeroes, "test_idle_timeout_zeroes", __LINE__);
+    UnityDefaultTestRun(test_revive_after_idle, "test_revive_after_idle", __LINE__);
 )

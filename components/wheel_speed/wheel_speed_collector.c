@@ -1,8 +1,9 @@
 /* wheel_speed_collector 实现：见头文件注释。 */
 #include "wheel_speed_collector.h"
 
-/* 间隔法静止判定：超过该时长无新脉冲即判定停止（攀爬车低速转动，
- * 一轮可短至几百 ms 到数秒；2s 上限覆盖尾部怠速停顿） */
+/* 静止归零超时：超过该时长无新脉冲即判定停止并清零 math（攀爬车
+ * 低速转动一轮可短至几百 ms 到数秒；2s 上限覆盖尾部怠速停顿）。
+ * 间隔法本身无法主动归零（无脉冲就不被调用），由本层兜底。 */
 #define IDLE_TIMEOUT_LONG_MS 2000u
 
 esp_err_t wheel_chan_sample(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
@@ -39,24 +40,24 @@ esp_err_t wheel_chan_sample(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
     st->trigger = (delta > 0);
     st->pulses_total += delta;
 
-    /* 窗口法只维护累计脉冲与 trigger；math(频率/RPM) 由间隔法维护。
-     * 主采样路径调用顺序：先 period（更新 math）再 sample（只累计），
-     * 避免窗口法 0 脉冲/20Hz 覆盖间隔法的低速准确值。 */
-    if (st->use_period) {
-        if (delta == 0) {
-            /* 间隔法下仍要处理静止归零：窗口法不驱动 EMA，
-             * 这里只做"长期无脉冲 → 速度清零" */
-            if (now_ms - st->math.last_pulse_ms > IDLE_TIMEOUT_LONG_MS) {
-                st->math.rpm_ema = 0.0f;
-                st->math.speed_cm_s = 0.0f;
-                st->math.speed_km_h = 0.0f;
-                st->math.freq_hz = 0.0f;
-            }
-        }
-        return ESP_OK;
+    /* 有脉冲时刷新 last_pulse_ms（间隔法在 sample_period 里也会刷新，
+     * 此处兜底确保即使本周期无有效间隔但有计数增量时静止判定不被误触） */
+    if (delta > 0) {
+        st->math.last_pulse_ms = now_ms;
     }
-    return wsmath_update(&st->math, delta, cfg->window_ms, cfg->magnets,
-                         cfg->wheel_diam_mm, cfg->alpha, now_ms);
+
+    /* 静止归零兜底：间隔法无脉冲时不会被调用，无法主动归零；
+     * 此处检查距上次脉冲是否超时，超时则清零 math 全字段。
+     * 清 has_sample 使恢复脉冲时首样本直采，避免缓慢爬升。 */
+    if (delta == 0 && now_ms - st->math.last_pulse_ms > IDLE_TIMEOUT_LONG_MS) {
+        st->math.rpm_ema = 0.0f;
+        st->math.speed_cm_s = 0.0f;
+        st->math.speed_km_h = 0.0f;
+        st->math.freq_hz = 0.0f;
+        st->math.has_sample = false;
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
@@ -66,8 +67,8 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
         return ESP_ERR_INVALID_ARG; /* 无有效脉冲间隔（未检测/光电异常），不虚假推算 */
     }
     st->trigger = true; /* 有间隔即表示本窗口检测到完整脉冲周期 */
-    /* 频率 = 1/间隔；注意与窗口法的关系：窗口法在单窗口 1 脉冲恒报
-     * 1s/window_ms 倍频，间隔法直接反映两次脉冲真实距离 */
+    /* 频率 = 1/间隔；间隔法直接反映两次脉冲真实距离，
+     * 低速（1Hz 级）也能准确测频，无窗口法的量化跳变。 */
     return wsmath_update_period(&st->math, interval_us, cfg->magnets,
                                 cfg->wheel_diam_mm, cfg->alpha, now_ms);
 }
