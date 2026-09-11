@@ -1,14 +1,18 @@
 /*
  * wheel_bench_main：入口编排。
- * NVS → 传感器 → 采集器注册 → 任务/队列 → WiFi AP → httpd。
+ * NVS → 传感器 → 采集器注册 → 任务 → WiFi AP → httpd。
  *
- * 数据流（一期）：sampler_task（Core0）每 50ms 读 4 路 PCNT 计数与 GPIO 电平
+ * 数据流：sampler_task（Core0）每 50ms 读 4 路 PCNT 计数与 GPIO 电平
  * → wheel 采集器运算 → telemetry 聚合渲染 → ws_push_task（Core0）每 100ms
  * 经 WebSocket 推给验证台网页。命令在 httpd 上下文处理（config 变更 + NVS）。
  *
+ * 舵机控制链挂在采样任务里，同一节拍推进：
+ *   四轮 rpm_ema → strategy（状态机算目标脉宽）→ 舵机执行器（模拟模型 / LEDC）
+ *   → 填 servo 渲染快照。不另起任务：只有几次浮点比较和几个寄存器写。
+ *
  * 任务表（优先/栈/核心见 wheel_config.h；固化进项目 CLAUDE.md）：
- *   sampler_task  Core0 22 3072  50ms 周期采样
- *   ws_push_task  Core0 15 4096  100ms 推遥测帧
+ *   sampler_task  Core0 22 3072  50ms 采样 + 舵机控制链
+ *   ws_push_task  Core0 15 8192  100ms 推遥测帧
  *   httpd server  Core1  5 8192  事件驱动
  */
 #include <string.h>
@@ -24,6 +28,9 @@
 
 #include "bench_http_server.h"
 #include "config_store.h"
+#include "servo_act.h"
+#include "strategy.h"
+#include "strategy_render.h"
 #include "telemetry.h"
 #include "wheel_bench.h"
 #include "wheel_config.h"
@@ -35,6 +42,16 @@ static cfg_params_t s_cfg;
 static SemaphoreHandle_t s_cfg_mutex;
 static wheel_unit_t s_units[WHEEL_COUNT];
 static wheel_chan_cfg_t s_chan_cfg;
+
+/* ---- 舵机控制链状态 ----
+ * 全部只由 sampler_task 写（启动时的初始化除外，那时任务还没起来）。
+ * 配置从 s_cfg 每拍现读现用，不跨任务共享可变结构。 */
+static servo_sim_t s_servo_sim;
+static const servo_act_ops_t *s_act_ops = &servo_sim_ops;
+static void *s_act_ctx = &s_servo_sim;
+static strategy_config_t s_strat_cfg; /* 采样任务专用，不跨任务共享 */
+static servo_render_state_t s_servo_disp; /* 采样任务写、ws_push 读（同 disp 约定） */
+static bool s_ledc_warned;
 
 /* ---- wheel_speed 采集器 ops（telemetry 框架注册） ---- */
 
@@ -131,6 +148,96 @@ static const telem_collector_ops_t s_wheel_ops = {
     .reset_baseline = wheel_collector_reset,
 };
 
+/* ---- 舵机控制链（采样任务内推进） ---- */
+
+/* cfg_params → strategy 配置。每拍现读现构，避免跨任务共享可变结构。 */
+static void strat_cfg_build(const cfg_params_t *cfg, strategy_config_t *out)
+{
+    strategy_config_default(out);
+    out->min_us = cfg->servo_min_us;
+    out->center_us = cfg->servo_center_us;
+    out->max_us = cfg->servo_max_us;
+    for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
+        out->invert[i] = cfg->servo_invert[i];
+        out->ch_enabled[i] = cfg->servo_en[i];
+        out->manual_us[i] = cfg->servo_manual_us[i];
+    }
+    out->mode = (cfg->servo_mode == CFG_SERVO_MODE_MANUAL) ? STRATEGY_MODE_MANUAL
+                                                           : STRATEGY_MODE_AUTO;
+    out->slip_engage_ratio = cfg->slip_engage_ratio;
+    out->slip_min_rpm = cfg->slip_min_rpm;
+    out->lock_hold_ms = cfg->lock_hold_ms;
+    out->lock_hold_max_ms = cfg->lock_hold_max_ms;
+    out->probe_window_ms = cfg->probe_window_ms;
+}
+
+static void servo_control_step(uint32_t now_ms)
+{
+    strat_cfg_build(&s_cfg, &s_strat_cfg);
+
+    /* Step 7 之前只有模拟执行器；配置要求实舵机时明确告警一次，不静默退回 */
+    if (!s_cfg.servo_sim && !s_ledc_warned) {
+        ESP_LOGE(TAG, "servo_sim=false：LEDC 驱动尚未接入，暂时仍用模拟舵机");
+        s_ledc_warned = true;
+    }
+    s_servo_sim.max_rate_us_s = (float)s_cfg.servo_sim_speed_us_s;
+
+    /* 被禁用的轮子不再更新 math，值是停用前的残留；喂 0 免得拿陈旧转速判打滑 */
+    float rpm[WHEEL_COUNT];
+    for (int i = 0; i < WHEEL_COUNT; i++) {
+        rpm[i] = s_cfg.wheel_enabled[i] ? s_units[i].chan.math.rpm_ema : 0.0f;
+    }
+
+    strategy_state_t st;
+    if (strategy_feed_wheel_rpm(rpm, &s_strat_cfg, now_ms) != ESP_OK ||
+        strategy_get_state(&st) != ESP_OK) {
+        return;
+    }
+
+    for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
+        bool en = s_strat_cfg.ch_enabled[i];
+        s_act_ops->set_enabled(s_act_ctx, (uint8_t)i, en);
+        if (en) {
+            s_act_ops->set_us(s_act_ctx, (uint8_t)i, st.servo[i].target_us);
+        }
+    }
+    s_act_ops->step(s_act_ctx, now_ms);
+
+    /* 填渲染快照：state 由这里推进，采集器的 sample 不再重复推一次 */
+    servo_act_chan_state_t act[SERVO_ACT_CHANNELS];
+    s_act_ops->get_state(s_act_ctx, act);
+    servo_render_state_t *d = &s_servo_disp;
+    d->src = s_cfg.servo_sim ? "sim" : "ledc";
+    d->sim = s_cfg.servo_sim;
+    d->sim_speed_us_s = s_cfg.servo_sim_speed_us_s;
+    d->cfg = s_strat_cfg;
+    for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
+        d->ch[i].enabled = s_strat_cfg.ch_enabled[i];
+        d->ch[i].reached = act[i].reached;
+        d->ch[i].target_us = st.servo[i].target_us;
+        d->ch[i].cur_us = act[i].cur_us;
+        d->ch[i].phase = st.servo[i].phase;
+        d->ch[i].hold_ms = st.servo[i].hold_ms;
+        d->ch[i].ratio = st.servo[i].ratio;
+        d->ch[i].slip_fast_left = st.servo[i].slip_fast_left;
+    }
+}
+
+static esp_err_t servo_collector_render(void *ctx, char *buf, size_t len, size_t *used)
+{
+    (void)ctx;
+    return servo_render_block(&s_servo_disp, buf, len, used);
+}
+
+/* sample 留空：状态由 servo_control_step 在同一采样任务里推进，框架不必再推一次 */
+static const telem_collector_ops_t s_servo_ops = {
+    .type = TELEM_TYPE_SERVO,
+    .init = NULL,
+    .sample = NULL,
+    .render = servo_collector_render,
+    .reset_baseline = NULL,
+};
+
 /* ---- 采样任务 ---- */
 
 static void sampler_task(void *arg)
@@ -149,6 +256,9 @@ static void sampler_task(void *arg)
 
         /* 采集器运算（帧渲染与其分离，由 ws_push 完成） */
         telem_sample_all(now_ms);
+
+        /* 舵机控制链：读刚更新的轮速，算目标、驱动执行器、填快照 */
+        servo_control_step(now_ms);
     }
 }
 
@@ -173,6 +283,7 @@ static void ws_push_task(void *arg)
         d->magnets = s_cfg.magnets;
         d->wheel_diam_mm = s_cfg.wheel_diam_mm;
         d->alpha = s_cfg.alpha;
+        d->debounce_ms = s_cfg.debounce_ms;
         d->sim_on = s_cfg.sim_on;
         for (int j = 0; j < WHEEL_COUNT; j++) {
             d->sim_rpm[j] = s_cfg.sim_rpm[j];
@@ -242,6 +353,18 @@ void app_main(void)
              (double)cfg.alpha,
              cfg.wheel_enabled[0], cfg.wheel_enabled[1],
              cfg.wheel_enabled[2], cfg.wheel_enabled[3], cfg.sim_on);
+    /* 舵机配置值得单独打一行：升级后这里能直接看出新字段是否落到了预期值
+     * （v1 blob 迁移后新字段取默认，一眼可辨） */
+    ESP_LOGI(TAG, "servo: sim=%d mode=%lu en=[%d,%d] us=%lu/%lu/%lu inv=[%d,%d] "
+                  "engage=%.2f minrpm=%.1f hold=%lu/%lu probe=%lu speed=%lu",
+             cfg.servo_sim, (unsigned long)cfg.servo_mode,
+             cfg.servo_en[0], cfg.servo_en[1],
+             (unsigned long)cfg.servo_min_us, (unsigned long)cfg.servo_center_us,
+             (unsigned long)cfg.servo_max_us, cfg.servo_invert[0], cfg.servo_invert[1],
+             (double)cfg.slip_engage_ratio, (double)cfg.slip_min_rpm,
+             (unsigned long)cfg.lock_hold_ms, (unsigned long)cfg.lock_hold_max_ms,
+             (unsigned long)cfg.probe_window_ms,
+             (unsigned long)cfg.servo_sim_speed_us_s);
 
     /* collector 配置快照 */
     s_chan_cfg.window_ms = WHEEL_SAMPLE_MS;
@@ -259,9 +382,17 @@ void app_main(void)
         memset(&s_units[i].disp, 0, sizeof(s_units[i].disp));
     }
 
-    /* 注册 wheel 采集器到 telemetry 框架 */
+    /* 舵机执行器：起步用模拟模型，起始位置取配置里的中位。
+     * 采样任务起来之前初始化，无竞争。 */
+    servo_sim_init(&s_servo_sim, (float)cfg.servo_sim_speed_us_s,
+                   (uint16_t)cfg.servo_center_us);
+    strategy_init();
+
+    /* 注册采集器到 telemetry 框架 */
     esp_err_t e = telem_register(&s_wheel_ops, NULL);
-    ESP_LOGI(TAG, "telemetry register: %d", e);
+    ESP_LOGI(TAG, "wheel collector register: %d", e);
+    e = telem_register(&s_servo_ops, NULL);
+    ESP_LOGI(TAG, "servo collector register: %d", e);
 
     wifi_ap_start();
 

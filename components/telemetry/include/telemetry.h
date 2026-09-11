@@ -2,8 +2,11 @@
  * telemetry：车载数据采集框架，纯 C 无 IDF 依赖。
  * 每个采集器是一个自包含对象（内部状态+配置+数据源），实现统一的 ops 接口后
  * 注册进框架；框架负责采样泵、遥测帧拼装，却完全不知道各采集器的内部细节。
- * 框架外新增一种采集器（如 IMU）：在 telem_type_t 末尾加枚举 → 实现 ops →
+ * 框架外新增一种采集器（如 IMU）：在 telem_type_t 里加枚举 → 实现 ops →
  * main 注册 → 前端加渲染函数。注册表启动期完成，运行期只读，无锁。
+ *
+ * ops 的 sample 可以为 NULL：状态由别处（如采样任务的控制路径）推进的采集器
+ * 不需要框架再推一次，只要有人填好快照、render 能读到即可。
  */
 #ifndef TELEMETRY_H
 #define TELEMETRY_H
@@ -22,6 +25,7 @@ extern "C" {
  * TELEM_TYPE_MOCK_BASE 起预留为宿主机测试的 mock 类型（固件不注册）。 */
 typedef enum {
     TELEM_TYPE_WHEEL_SPEED = 0,
+    TELEM_TYPE_SERVO = 1,        /* 差速舵机状态（策略阶段 + 指令 vs 到达） */
     TELEM_TYPE_MOCK_BASE = 100,  /* 宿主机测试用，固件构建不出现 */
     TELEM_TYPE_COUNT,            /* 非哨兵：不在前端渲染，只占位 */
 } telem_type_t;

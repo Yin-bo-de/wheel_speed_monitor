@@ -40,6 +40,7 @@ typedef struct {
     uint32_t magnets;
     uint32_t wheel_diam_mm;
     float alpha;
+    uint32_t debounce_ms; /* 去抖时长；前端表单靠它回显（此前硬编码 0） */
     bool sim_on;
     float sim_rpm[WHEEL_RENDER_COUNT];
     wheel_render_wheel_t wheels[WHEEL_RENDER_COUNT];

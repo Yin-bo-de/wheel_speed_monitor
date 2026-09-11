@@ -30,6 +30,9 @@ static SemaphoreHandle_t s_frame_mutex;
 
 /* WS 客户端表：fd 数组（单 WS /ws），0 空槽 */
 #define WS_CLIENT_MAX 4
+
+/* 单条 WS 命令上限。v2 舵机全字段配置约 400B，256 不够 */
+#define WS_CMD_MAX 1024
 static int s_ws_clients[WS_CLIENT_MAX];
 static SemaphoreHandle_t s_clients_mutex;
 
@@ -197,6 +200,110 @@ static esp_err_t handle_set_cfg(const char *payload)
         }
     }
 
+    /* ---- v2：差速舵机与锁定策略 ----
+     * 这些字段形态一致、数量多，用三个局部宏收掉样板：
+     * 取字段 → 赋值 → 逐字段校验（含跨字段约束）→ 置 changed，
+     * 任一不合法即整条命令拒绝，与上面 v1 各字段同一语义。 */
+#define TRY_U32(field, member)                                                            \
+    do {                                                                                  \
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, field)) != NULL &&                \
+            cJSON_IsNumber(j)) {                                                          \
+            next.member = (uint32_t)j->valueint;                                          \
+            if (cfg_params_validate(&next, field) != ESP_OK) {                            \
+                err_msg = field " out of range";                                          \
+                result = ESP_ERR_INVALID_ARG;                                             \
+                goto done;                                                                \
+            }                                                                             \
+            changed = true;                                                               \
+        }                                                                                 \
+    } while (0)
+
+#define TRY_F32(field, member)                                                            \
+    do {                                                                                  \
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, field)) != NULL &&                \
+            cJSON_IsNumber(j)) {                                                          \
+            next.member = (float)j->valuedouble;                                          \
+            if (cfg_params_validate(&next, field) != ESP_OK) {                            \
+                err_msg = field " out of range";                                          \
+                result = ESP_ERR_INVALID_ARG;                                             \
+                goto done;                                                                \
+            }                                                                             \
+            changed = true;                                                               \
+        }                                                                                 \
+    } while (0)
+
+#define TRY_BOOLS(field, member, count)                                                   \
+    do {                                                                                  \
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, field)) != NULL &&                \
+            cJSON_IsArray(j)) {                                                           \
+            for (int k_ = 0; k_ < (count); k_++) {                                        \
+                if (k_ < cJSON_GetArraySize(j)) {                                         \
+                    cJSON *it_ = cJSON_GetArrayItem(j, k_);                               \
+                    if (cJSON_IsBool(it_)) {                                              \
+                        next.member[k_] = cJSON_IsTrue(it_);                              \
+                    }                                                                     \
+                }                                                                         \
+            }                                                                             \
+            changed = true;                                                               \
+        }                                                                                 \
+    } while (0)
+
+    TRY_BOOLS("servo_en", servo_en, CFG_SERVO_COUNT);
+    TRY_BOOLS("servo_invert", servo_invert, CFG_SERVO_COUNT);
+
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "servo_sim")) != NULL && cJSON_IsBool(j)) {
+        next.servo_sim = cJSON_IsTrue(j);
+        changed = true;
+    }
+
+    /* 模式用可读字符串传，服务端转成枚举；非法取值整条拒绝 */
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "servo_mode")) != NULL &&
+        j->valuestring != NULL) {
+        if (strcmp(j->valuestring, "manual") == 0) {
+            next.servo_mode = CFG_SERVO_MODE_MANUAL;
+        } else if (strcmp(j->valuestring, "auto") == 0) {
+            next.servo_mode = CFG_SERVO_MODE_AUTO;
+        } else {
+            err_msg = "servo_mode invalid";
+            result = ESP_ERR_INVALID_ARG;
+            goto done;
+        }
+        changed = true;
+    }
+
+    /* 手动目标脉宽是数组：全部落进 next 后一次性校验逐个元素 */
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "servo_manual_us")) != NULL &&
+        cJSON_IsArray(j)) {
+        for (int i = 0; i < CFG_SERVO_COUNT; i++) {
+            if (i < cJSON_GetArraySize(j)) {
+                cJSON *item = cJSON_GetArrayItem(j, i);
+                if (cJSON_IsNumber(item)) {
+                    next.servo_manual_us[i] = (uint32_t)item->valueint;
+                }
+            }
+        }
+        if (cfg_params_validate(&next, "servo_manual_us") != ESP_OK) {
+            err_msg = "servo_manual_us out of range";
+            result = ESP_ERR_INVALID_ARG;
+            goto done;
+        }
+        changed = true;
+    }
+
+    TRY_U32("servo_min_us", servo_min_us);
+    TRY_U32("servo_center_us", servo_center_us);
+    TRY_U32("servo_max_us", servo_max_us);
+    TRY_F32("slip_engage_ratio", slip_engage_ratio);
+    TRY_F32("slip_min_rpm", slip_min_rpm);
+    TRY_U32("lock_hold_ms", lock_hold_ms);
+    TRY_U32("lock_hold_max_ms", lock_hold_max_ms);
+    TRY_U32("probe_window_ms", probe_window_ms);
+    TRY_U32("servo_sim_speed_us_s", servo_sim_speed_us_s);
+
+#undef TRY_U32
+#undef TRY_F32
+#undef TRY_BOOLS
+
     if (changed) {
         *cfg = next;
         config_store_save(cfg);
@@ -242,12 +349,13 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (ret != ESP_OK) {
         return ESP_FAIL;
     }
-    if (frame.len > 256) {
+    /* 1024：v2 舵机全字段配置命令约 400B，旧的 256B 上限会把 set_cfg 整条丢掉 */
+    if (frame.len > WS_CMD_MAX) {
         return ESP_ERR_INVALID_ARG; /* 过大丢弃 */
     }
-    char payload[257];
+    char payload[WS_CMD_MAX + 1];
     frame.payload = (uint8_t *)payload;
-    ret = httpd_ws_recv_frame(req, &frame, 256);
+    ret = httpd_ws_recv_frame(req, &frame, WS_CMD_MAX);
     if (ret != ESP_OK) {
         return ESP_FAIL;
     }
@@ -352,7 +460,10 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
     uri.uri = "/index.html";
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(hd, &uri), TAG, "err");
 
+    /* handler 必须显式重设：uri 结构体是从上一项改的，漏设会继续用 handle_index，
+     * /api/status 就返回 HTML，前端 2 秒兜底轮询永远拿不到 JSON */
     uri.uri = "/api/status";
+    uri.handler = handle_api_status;
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(hd, &uri), TAG, "err");
 
     uri.uri = "/ws";

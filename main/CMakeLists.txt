@@ -3,5 +3,5 @@ idf_component_register(
     INCLUDE_DIRS "."
     EMBED_FILES "www/index.html"
     REQUIRES nvs_flash esp_wifi esp_netif esp_event esp_http_server json
-              telemetry wheel_speed wheel_sensor strategy
+              telemetry wheel_speed wheel_sensor strategy servo_act
 )
