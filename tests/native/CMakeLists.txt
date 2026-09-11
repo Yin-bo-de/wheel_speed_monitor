@@ -31,6 +31,10 @@ set(TELEMETRY_SRCS
 )
 set(STRATEGY_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/strategy/strategy.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/strategy/strategy_render.c
+)
+set(SERVO_ACT_SRCS
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/servo_act/servo_sim.c
 )
 set(MAIN_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main/config_params.c
@@ -43,6 +47,7 @@ set(COMMON_INC_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/wheel_speed/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/telemetry/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/strategy/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/servo_act/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main
 )
 
@@ -64,3 +69,5 @@ add_native_test(telemetry ${TELEMETRY_SRCS})
 add_native_test(config_params ${MAIN_SRCS})
 add_native_test(render ${WHEEL_SPEED_SRCS})
 add_native_test(strategy ${STRATEGY_SRCS})
+add_native_test(servo_sim ${SERVO_ACT_SRCS})
+add_native_test(strategy_render ${STRATEGY_SRCS})
