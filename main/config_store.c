@@ -30,7 +30,22 @@ esp_err_t config_store_load(cfg_params_t *out)
     e = nvs_get_blob(h, CFG_KEY, blob, &len);
     nvs_close(h);
     if (e == ESP_OK) {
-        return cfg_params_unpack(blob, len, out);
+        esp_err_t ue = cfg_params_unpack(blob, len, out);
+        if (ue != ESP_OK) {
+            return ue;
+        }
+        /* 读到旧版 blob（一期固件写下的 v1）：解出的新字段是默认值，
+         * 立刻回写 v2，之后 NVS 恒为最新布局，不必每次上电都迁移一次。 */
+        if (blob[0] != CFG_PARAMS_BLOB_VERSION) {
+            ESP_LOGW(TAG, "config blob v%u migrated to v%d", (unsigned)blob[0],
+                     CFG_PARAMS_BLOB_VERSION);
+            /* 回写失败不影响本次使用（RAM 里的配置是有效的），记日志即可 */
+            esp_err_t se = config_store_save(out);
+            if (se != ESP_OK) {
+                ESP_LOGE(TAG, "migrated config save failed: %d", se);
+            }
+        }
+        return ESP_OK;
     }
     if (e == ESP_ERR_NVS_NOT_FOUND) {
         /* 键不存在（namespace 存在但没写过）→ 默认值并回写 */
