@@ -20,12 +20,24 @@ ctest --test-dir tests/native/build --output-on-failure
 
 ## 代码组织纪律
 
+**新增模块（采集器、驱动、配置项、任务）必须先对齐下面的分层，不要另起一套。**
+偏离需有明确理由，并在改动说明里写清为什么。
+
+- **纯算的与碰硬件的分开。** 逻辑/数学/状态机写纯 C 组件——**不依赖 IDF**（可宿主机测），
+  头文件 include `esp_err.h`（宿主命中 tests/native/include 的 shim，
+  IDF 命中 esp_common 的真实 esp_err.h）；硬件驱动单独成组件（依赖 esp_driver_*，
+  不宿主机测）。现有对照：`wheel_speed`（纯逻辑）↔ `wheel_sensor`（硬件层）。
+- **新数据走 telemetry 采集器框架**：按 README「扩展」四步接
+  （`telem_type_t` 加枚举 → 实现 ops → `app_main` 注册 → 前端 `applyFrame` 渲染），
+  不绕过框架自己推数据。
+- **新配置进 `cfg_params`**：纯 C 模型 + 逐字段校验 + blob pack/unpack；blob 字段
+  变更必须升版本号并兼容旧版。NVS 读写只经 `config_store` 薄封装，别处不直接调
+  nvs API。
+- **不轻易加任务**：先看上面任务表能否挂载（重逻辑 Core0 / httpd Core1）；
+  确实要加则同步更新本文件的任务表。
 - `main/CMakeLists.txt` 的 `SRCS`/`REQUIRES` 显式清单；新增 .c 必须加进 SRCS
   （漏了最常见的报错是 `undefined reference`）。EMBED_FILES 嵌入 www 资源。
-- 纯逻辑层组件（telemetry/wheel_speed/strategy）**不依赖 IDF**（可宿主机测），
-  头文件 include `esp_err.h`（宿主命中 tests/native/include 的 shim，
-  IDF 命中 esp_common 的真实 esp_err.h）。硬件层（wheel_sensor）依赖
-  esp_driver_pcnt/esp_driver_gpio，不宿主机测。
+  宿主机可测的 .c 还要进 `tests/native/CMakeLists.txt` 的对应 SRCS 分组。
 - 宏约定：`ESP_RETURN_ON_ERROR(x, TAG, "msg")`（4 参 IDF 签名，TAG 每文件定义）；
   函数小写蛇形、返回 esp_err_t、错误通路宏统一。
 - 注释解释"为什么"而非"做什么"。中文或英文保持一致即可（当前用中文）。
