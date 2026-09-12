@@ -19,7 +19,10 @@ static const char *TAG = "benchhttp";
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
 
-static const bench_server_ctx_t *s_ctx;
+/* 按值持有上下文，不存调用方指针：ctx 若是 app_main 的栈变量，函数返回后
+ * 栈帧即被回收，此后 httpd 任务再解引用就是读已释放内存（表现为
+ * xSemaphoreTake 拿到垃圾句柄、assert pxQueue->uxItemSize == 0）。 */
+static bench_server_ctx_t s_ctx;
 static httpd_handle_t s_server_handle; /* 广播时直接用，不动态获取 */
 
 /* 最新遥测帧快照（ws_push_task 写入；/api/status 读取） */
@@ -101,6 +104,9 @@ static void ws_client_unregister(int fd)
         }
     }
     xSemaphoreGive(s_clients_mutex);
+    /* 断开此前是静默的：页面掉线后只表现为"设置点了没反应"，日志里
+     * 看不出连接何时掉的，排查只能靠猜。留一行好对上时间线。 */
+    ESP_LOGW(TAG, "WS client disconnected fd=%d", fd);
 }
 
 /* ---- 命令处理（在 httpd 上下文） ---- */
@@ -116,8 +122,8 @@ static esp_err_t handle_set_cfg(const char *payload)
     esp_err_t result = ESP_OK;
     const char *err_msg = NULL;
 
-    cfg_params_t *cfg = s_ctx->cfg;
-    xSemaphoreTake(s_ctx->cfg_mutex, portMAX_DELAY);
+    cfg_params_t *cfg = s_ctx.cfg;
+    xSemaphoreTake(s_ctx.cfg_mutex, portMAX_DELAY);
 
     cfg_params_t next = *cfg;
     bool changed = false;
@@ -312,7 +318,7 @@ static esp_err_t handle_set_cfg(const char *payload)
     }
 
 done:
-    xSemaphoreGive(s_ctx->cfg_mutex);
+    xSemaphoreGive(s_ctx.cfg_mutex);
     cJSON_Delete(root);
     if (err_msg) {
         ESP_LOGE(TAG, "set_cfg rejected: %s", err_msg);
@@ -322,11 +328,11 @@ done:
 
 static void handle_reset_counts(void)
 {
-    xSemaphoreTake(s_ctx->cfg_mutex, portMAX_DELAY);
+    xSemaphoreTake(s_ctx.cfg_mutex, portMAX_DELAY);
     for (int i = 0; i < WHEEL_COUNT; i++) {
-        wheel_chan_reset_counts(&s_ctx->units[i].chan);
+        wheel_chan_reset_counts(&s_ctx.units[i].chan);
     }
-    xSemaphoreGive(s_ctx->cfg_mutex);
+    xSemaphoreGive(s_ctx.cfg_mutex);
 }
 
 /* WS 处理（is_websocket=true 注册）：握手后每次收帧调用。
@@ -347,16 +353,19 @@ static esp_err_t ws_handler(httpd_req_t *req)
     /* 先取长度 */
     esp_err_t ret = httpd_ws_recv_frame(req, &frame, 0);
     if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ws recv len failed: %d", ret);
         return ESP_FAIL;
     }
     /* 1024：v2 舵机全字段配置命令约 400B，旧的 256B 上限会把 set_cfg 整条丢掉 */
     if (frame.len > WS_CMD_MAX) {
+        ESP_LOGW(TAG, "ws frame too large: %u > %d", (unsigned)frame.len, WS_CMD_MAX);
         return ESP_ERR_INVALID_ARG; /* 过大丢弃 */
     }
     char payload[WS_CMD_MAX + 1];
     frame.payload = (uint8_t *)payload;
     ret = httpd_ws_recv_frame(req, &frame, WS_CMD_MAX);
     if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ws recv body failed: %d (len=%u)", ret, (unsigned)frame.len);
         return ESP_FAIL;
     }
     payload[frame.len] = '\0';
@@ -434,7 +443,10 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
      * app_main 先 start（创建 mutex + httpd）再启动 ws_push_task，否则
      * 任务先跑会 xSemaphoreTake(NULL) 触发 assert（LoadProhibited 属于次生）。
      * 若想彻底解耦，可改由 app_main 预先创建并传入；此处按调用顺序保证。 */
-    s_ctx = ctx;
+    if (ctx == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_ctx = *ctx; /* 按值拷贝：调用方的 ctx 可以随其栈帧消亡，httpd 不受影响 */
     s_frame_mutex = xSemaphoreCreateMutex();
     s_clients_mutex = xSemaphoreCreateMutex();
     memset(s_ws_clients, 0, sizeof(s_ws_clients));
