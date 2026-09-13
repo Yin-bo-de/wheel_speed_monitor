@@ -92,7 +92,7 @@
   </div>
 
   <div class="card" style="margin-top:12px">
-    <h2>差速舵机 <span class="note">(指令 → 到达)</span></h2>
+    <h2>差速舵机 <span class="note">(指令 → 到达)</span> <span class="note" id="ssrc">—</span></h2>
     <div id="servos"></div>
     <p class="hint">锁定期间刻意不看轮速差——锁上之后两轮被强制同步，速差会被动作本身抹平。所以保持期走完先松开试探，试探窗口只在车轮转动时累加。</p>
   </div>
@@ -367,6 +367,14 @@ function renderWheels(wheels) {
 function renderServo(sv) {
   const cfg = sv.cfg || {};
   if (!dirty.servo) echoServoCfg(sv, cfg);
+
+  /* 报的是"实际在跑哪个执行器"，不是"配置里勾了哪个"。两者不一致只可能是
+   * LEDC 初始化失败——那是必须让人看见的事，所以标红而不是悄悄显示成模拟。 */
+  const ssrc = $("ssrc");
+  const mismatch = (cfg.sim === false) && (sv.src !== "ledc");
+  ssrc.textContent = (sv.src === "ledc") ? "实际输出：LEDC GPIO41/42" : "实际输出：模拟模型";
+  ssrc.className = mismatch ? "slip" : "note";
+  if (mismatch) ssrc.textContent += "（LEDC 未起来，看串口日志）";
 
   const lo = cfg.min_us ?? 1000, hi = cfg.max_us ?? 2000, span = Math.max(1, hi - lo);
   sv.servos.forEach((s, i) => {

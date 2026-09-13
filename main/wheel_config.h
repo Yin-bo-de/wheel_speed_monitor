@@ -54,10 +54,17 @@ extern "C" {
 #define WHEEL_RAW_Q_LEN 4
 #define WHEEL_TELE_Q_LEN 4
 
-/* 二期 PWM 引脚预留（v1 只留常量与注释，不接线）：
- * + 舵机输出候选 GPIO41/42，默认 JTAG，启用时需关 JTAG 重配普通 IO；
- * + RC 接收机输入脚二期再定；此表在动硬件前核对 CLAUDE.md 引脚表。 */
-#define WHEEL_SERVO_GPIO_PLANNED 42
+/* 差速舵机输出（LEDC，50Hz 标准舵机）。
+ *
+ * 41/42 是 ESP32-S3 的 JTAG 脚（MTDI/MTMS），但那是"外部 JTAG 探针"用的引脚：
+ * 默认的调试通道是芯片内置 USB-Serial-JTAG，它走内部 TAP、不占用这四个脚
+ * （IDF 文档 jtag-debugging/tips-and-quirks：用内置 USJ 调试时 GPIO39-42
+ * 可另作他用）。所以这里直接拿来用，不必关 JTAG、不必切 console、不必烧 efuse。
+ * 唯一的冲突来源是有人烧了 DIS_USB_JTAG efuse 把 JTAG 引到引脚上。
+ *
+ * RC 接收机输入脚二期再定；动硬件前核对 CLAUDE.md 引脚表。 */
+#define WHEEL_SERVO_GPIO_FRONT 41 /* 前差速 */
+#define WHEEL_SERVO_GPIO_REAR 42  /* 后差速 */
 
 #ifdef __cplusplus
 }
