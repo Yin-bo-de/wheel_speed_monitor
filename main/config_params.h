@@ -4,8 +4,10 @@
  * 默认值、逐字段校验、NVS blob 打包/解包。
  *
  * blob 版本迁移：v1（32B）是一期的布局；v2（72B）在尾部追加舵机与
- * 锁定策略参数。解包按首字节版本号分派——v1 blob 仍可解，新字段取默认值，
- * 上层解出后再回写 v2，升级不丢用户已设的配置。
+ * 锁定策略参数；v3（72B）把舵机脉宽从"共享的 min/center/max + invert"
+ * 换成"每通道的解锁/锁定两档"。解包按首字节版本号分派——旧 blob 仍可解，
+ * 缺失字段取默认值（v2 还要按旧语义换算，见 cfg_params_unpack），
+ * 上层解出后回写最新版，升级不丢用户已设的配置。
  */
 #ifndef CONFIG_PARAMS_H
 #define CONFIG_PARAMS_H
@@ -50,14 +52,18 @@ extern "C" {
 /* blob 定长布局（尾部补零）：
  *   v1 段 0..31：版本(1B) + magnets(1B) + diam(4B) + alpha(4B float)
  *               + wheel_enabled(1B 位图) + sim_on(1B) + sim_rpm[4](16B) + debounce_ms(4B)
- *   v2 段 32..71：servo_sim(1B) + servo_en(1B 位图) + servo_mode(1B)
- *               + min/center/max(u16×3) + manual_us(u16×2)
+ *   v3 段 32..75：servo_sim(1B) + servo_en(1B 位图) + servo_mode(1B)
+ *               + unlock_us(u16×2) + lock_us(u16×2) + manual_us(u16×2)
  *               + engage/min_rpm(float×2) + lock_hold/max/probe(u32×3)
- *               + sim_speed(u32) + 保留(3B) */
-#define CFG_PARAMS_BLOB_VERSION 2
-#define CFG_PARAMS_BLOB_SIZE 72
+ *               + sim_speed(u32) + 保留(5B)
+ * v2 段（32..71）与 v3 段是同义不同形：v2 用共享的 min/center/max + invert
+ * 位图描述脉宽，v3 换成每通道两档，因此长 4 字节、其余字段偏移整体后移。 */
+#define CFG_PARAMS_BLOB_VERSION 3
+#define CFG_PARAMS_BLOB_SIZE 76
 #define CFG_PARAMS_BLOB_VERSION_1 1
 #define CFG_PARAMS_BLOB_SIZE_V1 32
+#define CFG_PARAMS_BLOB_VERSION_2 2
+#define CFG_PARAMS_BLOB_SIZE_V2 72
 
 typedef struct {
     uint32_t magnets;    /* 每转磁铁数 1-16 */
@@ -68,14 +74,15 @@ typedef struct {
     float sim_rpm[CFG_WHEEL_COUNT];
     uint32_t debounce_ms; /* 最小脉冲间隔去抖；0=关闭 */
 
-    /* ---- v2：差速舵机 ---- */
+    /* ---- v2：差速舵机（v3 起脉宽改为每通道两档） ---- */
     bool servo_sim; /* true=模拟舵机模型；false=LEDC 驱动真实舵机 */
     bool servo_en[CFG_SERVO_COUNT];
-    uint32_t servo_min_us;    /* 脉宽下限（满偏一端） */
-    uint32_t servo_center_us; /* 中位脉宽 = 解锁位置 */
-    uint32_t servo_max_us;    /* 脉宽上限（满偏另一端） */
-    bool servo_invert[CFG_SERVO_COUNT];
-    uint32_t servo_mode; /* CFG_SERVO_MODE_* */
+    /* 自动模式只有这两个落点，前后轴各配一组：差速器的锁止/释放是两个确定的
+     * 机械位置，中间行程没有意义。反装的舵机把两档改填到行程另一端即可，
+     * 不必再引入一个"反向"开关。 */
+    uint32_t servo_unlock_us[CFG_SERVO_COUNT]; /* 解锁档（正常行驶位置） */
+    uint32_t servo_lock_us[CFG_SERVO_COUNT];   /* 锁定档（差速锁死位置） */
+    uint32_t servo_mode;                       /* CFG_SERVO_MODE_* */
     uint32_t servo_manual_us[CFG_SERVO_COUNT]; /* 手动模式目标脉宽 */
 
     /* ---- v2：打滑判定与锁定策略 ---- */

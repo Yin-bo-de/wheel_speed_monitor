@@ -94,7 +94,8 @@
   <div class="card" style="margin-top:12px">
     <h2>差速舵机 <span class="note">(指令 → 到达)</span> <span class="note" id="ssrc">—</span></h2>
     <div id="servos"></div>
-    <p class="hint">锁定期间刻意不看轮速差——锁上之后两轮被强制同步，速差会被动作本身抹平。所以保持期走完先松开试探，试探窗口只在车轮转动时累加。</p>
+    <p class="hint">锁定期间刻意不看轮速差——锁上之后两轮被强制同步，速差会被动作本身抹平。所以保持期走完先松开试探；
+      试探窗口数的是「车轮动/停状态保持不变」的时长，中途状态翻转就重新计时。</p>
   </div>
 </section>
 
@@ -136,13 +137,15 @@
       <label><input type="radio" name="servo-mode" value="manual"> 手动（直设脉宽）</label>
     </div>
 
+    <h2 style="margin-top:14px">脉宽映射 <span class="note">(两档式，标准角度舵机 50Hz)</span></h2>
     <div class="grid grid-2" style="margin-top:8px">
       <div>
         <div class="en"><b style="font-size:12px">前差速</b>
           <label><input type="checkbox" id="sen0"> 使能</label>
-          <label><input type="checkbox" id="sinv0"> 反向</label>
         </div>
         <div class="cfg-grid">
+          <div><label>解锁(µs)</label><input id="unlock0" type="number" min="500" max="2500" value="1500"></div>
+          <div><label>锁定(µs)</label><input id="lock0" type="number" min="500" max="2500" value="2000"></div>
           <div><label>手动目标(µs) <b id="man0v">1500</b></label>
             <input id="man0" type="range" min="500" max="2500" step="10" value="1500"></div>
         </div>
@@ -150,22 +153,17 @@
       <div>
         <div class="en"><b style="font-size:12px">后差速</b>
           <label><input type="checkbox" id="sen1"> 使能</label>
-          <label><input type="checkbox" id="sinv1"> 反向</label>
         </div>
         <div class="cfg-grid">
+          <div><label>解锁(µs)</label><input id="unlock1" type="number" min="500" max="2500" value="1500"></div>
+          <div><label>锁定(µs)</label><input id="lock1" type="number" min="500" max="2500" value="2000"></div>
           <div><label>手动目标(µs) <b id="man1v">1500</b></label>
             <input id="man1" type="range" min="500" max="2500" step="10" value="1500"></div>
         </div>
       </div>
     </div>
-
-    <h2 style="margin-top:14px">脉宽映射 <span class="note">(标准角度舵机 50Hz)</span></h2>
-    <div class="cfg-grid">
-      <div><label>下限 min(µs)</label><input id="smin" type="number" min="500" max="2500" value="1000"></div>
-      <div><label>中位 center(µs)</label><input id="scenter" type="number" min="500" max="2500" value="1500"></div>
-      <div><label>上限 max(µs)</label><input id="smax" type="number" min="500" max="2500" value="2000"></div>
-    </div>
-    <p class="hint">min &lt; center &lt; max 必须严格递增。center 是解锁位置，锁定去 min 或 max 那一端（由「反向」决定）。</p>
+    <p class="hint">自动模式下每个通道只有两个落点：解锁 = 正常行驶位置，锁定 = 差速锁死位置。前后轴各配一组，
+      两轴舵机的安装朝向不同时各填各的行程端即可，不需要「反向」开关。手动模式不理这两档，直接输出手动目标。</p>
 
     <h2 style="margin-top:14px">打滑判定</h2>
     <div class="cfg-grid">
@@ -257,6 +255,7 @@ function buildPanels() {
       <div class="servo-val">
         <span>指令</span><b id="stgt${i}">—</b>
         <span>到达</span><b id="scur${i}">—</b>
+        <span>落点</span><b id="sdet${i}">—</b>
         <span>保持</span><b id="shold${i}">—</b>
         <span>速差</span><b id="sratio${i}">—</b>
       </div>
@@ -376,16 +375,20 @@ function renderServo(sv) {
   ssrc.className = mismatch ? "slip" : "note";
   if (mismatch) ssrc.textContent += "（LEDC 未起来，看串口日志）";
 
-  const lo = cfg.min_us ?? 1000, hi = cfg.max_us ?? 2000, span = Math.max(1, hi - lo);
   sv.servos.forEach((s, i) => {
+    /* 进度条的两端就是该通道的两个落点（两档式，行程中没有其它位置）。
+     * 装反的轴两档是反的，用 min/max 兜住，条子方向才不会倒过来。 */
+    const unlock = (cfg.unlock_us || [])[i] ?? 1500, lock = (cfg.lock_us || [])[i] ?? 2000;
+    const lo = Math.min(unlock, lock), hi = Math.max(unlock, lock), span = Math.max(1, hi - lo);
+    $(`sdet${i}`).textContent = `解锁 ${unlock} / 锁定 ${lock}`;
     const badge = $("sphase" + i);
     badge.textContent = PHASE_TEXT[s.phase] || s.phase;
     badge.className = "badge " + s.phase;
     $("smode" + i).textContent = (sv.mode === "manual" ? "手动" : "自动") + (s.en ? "" : " · 已禁用");
     $("sslip" + i).textContent = s.slip_left ? "左侧更快" : (s.ratio > 0.01 ? "右侧更快" : "");
     $("sreached" + i).textContent = s.reached ? "✓ 已到位" : "";
-    $("stgt" + i).textContent = s.target_us + "µs (" + fmt(s.target_deg, 0) + "°)";
-    $("scur" + i).textContent = fmt(s.cur_us, 0) + "µs (" + fmt(s.cur_deg, 0) + "°)";
+    $("stgt" + i).textContent = s.target_us + "µs";
+    $("scur" + i).textContent = fmt(s.cur_us, 0) + "µs";
     $("shold" + i).textContent = s.phase === "idle" ? "—" : (s.hold_ms / 1000).toFixed(1) + "s";
     $("sratio" + i).textContent = fmt(s.ratio * 100, 0) + "%";
     $("sbar" + i).style.width = Math.max(0, Math.min(100, (s.cur_us - lo) / span * 100)) + "%";
@@ -397,7 +400,8 @@ function echoServoCfg(sv, cfg) {
   echoChk($("servo-sim"), cfg.sim);
   for (let i = 0; i < SERVO; i++) {
     echoChk($("sen" + i), (sv.servos[i] || {}).en);
-    echoChk($("sinv" + i), cfg.invert && cfg.invert[i]);
+    if (cfg.unlock_us) echoNum($("unlock" + i), cfg.unlock_us[i]);
+    if (cfg.lock_us) echoNum($("lock" + i), cfg.lock_us[i]);
     const sl = $("man" + i);
     if (document.activeElement !== sl && cfg.manual_us) {
       sl.value = cfg.manual_us[i];
@@ -406,9 +410,6 @@ function echoServoCfg(sv, cfg) {
   }
   const radios = document.querySelectorAll('input[name="servo-mode"]');
   radios.forEach(r => { if (document.activeElement !== r) r.checked = (r.value === cfg.mode); });
-  echoNum($("smin"), cfg.min_us);
-  echoNum($("scenter"), cfg.center_us);
-  echoNum($("smax"), cfg.max_us);
   echoNum($("sengage"), cfg.engage);
   echoNum($("sminrpm"), cfg.min_rpm);
   echoNum($("shold"), cfg.hold_ms);
@@ -453,7 +454,7 @@ function applySim() {
 }
 
 /* 舵机配置单独一条命令：全字段一起提交，
- * 脉宽三元组与保持上限的跨字段校验才能一次拿到一致的一组值 */
+ * 三组脉宽数组与保持上限的跨字段校验才能一次拿到一致的一组值 */
 function applyServoCfg() {
   const mode = document.querySelector('input[name="servo-mode"]:checked');
   send({
@@ -461,11 +462,9 @@ function applyServoCfg() {
     servo_sim: $("servo-sim").checked,
     servo_mode: mode ? mode.value : "auto",
     servo_en: [0, 1].map(i => $("sen" + i).checked),
-    servo_invert: [0, 1].map(i => $("sinv" + i).checked),
+    servo_unlock_us: [0, 1].map(i => parseInt($("unlock" + i).value, 10)),
+    servo_lock_us: [0, 1].map(i => parseInt($("lock" + i).value, 10)),
     servo_manual_us: [0, 1].map(i => parseInt($("man" + i).value, 10)),
-    servo_min_us: parseInt($("smin").value, 10),
-    servo_center_us: parseInt($("scenter").value, 10),
-    servo_max_us: parseInt($("smax").value, 10),
     slip_engage_ratio: parseFloat($("sengage").value),
     slip_min_rpm: parseFloat($("sminrpm").value),
     lock_hold_ms: parseInt($("shold").value, 10),

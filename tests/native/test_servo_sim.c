@@ -14,10 +14,11 @@ void tearDown(void) {}
 static servo_sim_t sim;
 static servo_act_chan_state_t st[SERVO_ACT_CHANNELS];
 
-/* 速率 3000µs/s（默认值）：100ms 走 300µs。 */
-static void fresh(uint16_t start_us)
+/* 两通道同一起始位置，多数用例只关心单通道行为 */
+static void fresh(uint32_t start_us)
 {
-    servo_sim_init(&sim, 3000.0f, start_us);
+    const uint32_t start[SERVO_ACT_CHANNELS] = {start_us, start_us};
+    servo_sim_init(&sim, 3000.0f, start);
     servo_sim_ops.step(&sim, 1000); /* 建立时间基准 */
 }
 
@@ -26,14 +27,18 @@ static void read_state(void)
     servo_sim_ops.get_state(&sim, st);
 }
 
-/* 1. 初始化后停在中位，已视为到达 */
+/* 1. 初始化后停在该通道给定的起始位置，已视为到达 */
 static void test_init_at_start(void)
 {
-    fresh(1500);
+    const uint32_t start[SERVO_ACT_CHANNELS] = {1500, 1200}; /* 前后起始位置可以不同 */
+    servo_sim_init(&sim, 3000.0f, start);
+    servo_sim_ops.step(&sim, 1000);
     read_state();
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 1500.0f, st[0].cur_us);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 1500.0f, st[0].target_us);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1200.0f, st[1].cur_us);
     TEST_ASSERT_TRUE(st[0].reached);
+    TEST_ASSERT_TRUE(st[1].reached);
 }
 
 /* 2. 目标跳变后按速率线性推进：100ms 走 300µs（不是一步到位） */
@@ -117,7 +122,8 @@ static void test_disabled_channel_holds_position(void)
 static void test_first_step_does_not_jump(void)
 {
     servo_sim_t s;
-    servo_sim_init(&s, 3000.0f, 1500);
+    const uint32_t start[SERVO_ACT_CHANNELS] = {1500, 1500};
+    servo_sim_init(&s, 3000.0f, start);
     servo_sim_ops.set_us(&s, 0, 2000);
     servo_sim_ops.step(&s, 999999); /* 若按 now-0 算 dt，会瞬间跑完 */
     servo_act_chan_state_t o[SERVO_ACT_CHANNELS];

@@ -39,13 +39,15 @@ typedef struct {
     bool inited;
 } servo_ledc_t;
 
-/* 初始化两个通道并停输出（脱力）。center_us 作为复位后的目标脉宽——
- * 通道被使能时先输出它，等控制链按策略给出真实目标。
+/* 初始化两个通道并停输出（脱力）。unlock_us 逐通道给定，作为通道被使能时
+ * 的首个输出值——控制链随即按策略给出真实目标，这里填的只是"补位"值，
+ * 取解锁档最稳：那一刻差速本来就是松开的。
  *
  * 幂等：已初始化则直接返回 ESP_OK，执行器来回切换不会重复占用 LEDC 资源。
  * 频率按 FREQ_HZ 设定，实际频率不符（超差 1Hz）时打警告但继续——舵机能容忍
  * 轻微频偏，这里不该因为一个警告把整条链路停掉。 */
-esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear, uint32_t center_us);
+esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear,
+                          const uint32_t unlock_us[SERVO_ACT_CHANNELS]);
 
 extern const servo_act_ops_t servo_ledc_ops;
 

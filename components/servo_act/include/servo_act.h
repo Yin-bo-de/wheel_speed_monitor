@@ -8,7 +8,7 @@
  *   - servo_ledc 真实 LEDC 输出（IDF 依赖，不参与宿主机测试）。
  *
  * 位置一律用脉宽 µs 表达：舵机位置对脉宽单调，模型不必再引入"角度"这一层
- * 抽象；角度只在渲染与策略映射处出现（strategy_deg_to_us / us_to_deg）。
+ * 抽象。策略层给的也是两档脉宽（解锁/锁定），到这里就是"去哪两个点"。
  */
 #ifndef SERVO_ACT_H
 #define SERVO_ACT_H
@@ -55,8 +55,10 @@ typedef struct {
     bool primed;          /* 首次 step 只建立时间基准，不移动 */
 } servo_sim_t;
 
-/* 起始位置 start_us（通常取配置里的中位脉宽）。 */
-void servo_sim_init(servo_sim_t *s, float max_rate_us_s, uint16_t start_us);
+/* 起始位置逐通道给定，通常取配置里的解锁档脉宽——上电时差速应当是松开的，
+ * 且前后两轴的解锁落点可以不同，取一个共用值会让其中一轴开机就偏。 */
+void servo_sim_init(servo_sim_t *s, float max_rate_us_s,
+                    const uint32_t start_us[SERVO_ACT_CHANNELS]);
 
 extern const servo_act_ops_t servo_sim_ops;
 

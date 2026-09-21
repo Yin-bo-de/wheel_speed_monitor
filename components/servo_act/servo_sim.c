@@ -7,7 +7,8 @@
  * 不吸附就会一直 reported 未到达。 */
 #define SERVO_SIM_EPS_US 1.0f
 
-void servo_sim_init(servo_sim_t *s, float max_rate_us_s, uint16_t start_us)
+void servo_sim_init(servo_sim_t *s, float max_rate_us_s,
+                    const uint32_t start_us[SERVO_ACT_CHANNELS])
 {
     if (s == NULL) {
         return;
@@ -15,8 +16,9 @@ void servo_sim_init(servo_sim_t *s, float max_rate_us_s, uint16_t start_us)
     memset(s, 0, sizeof(*s));
     s->max_rate_us_s = (max_rate_us_s > 0.0f) ? max_rate_us_s : 1.0f;
     for (int i = 0; i < SERVO_ACT_CHANNELS; i++) {
-        s->cur_us[i] = (float)start_us;
-        s->target_us[i] = (float)start_us;
+        float us = (start_us != NULL) ? (float)start_us[i] : 1500.0f;
+        s->cur_us[i] = us;
+        s->target_us[i] = us;
         s->enabled[i] = true;
     }
     s->primed = false;

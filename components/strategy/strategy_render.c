@@ -38,31 +38,26 @@ esp_err_t servo_render_block(const servo_render_state_t *rs,
 
     for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
         const servo_render_chan_t *c = &rs->ch[i];
-        /* 角度由脉宽经同一套映射反算，与 strategy_deg_to_us 互逆——
-         * 映射规则只在 strategy.c 里实现一次，这里不另写一份。 */
+        /* 只报脉宽不报角度：自动模式的落点由配置直接给定（两档），
+         * "多少度"在这个映射下没有确定含义，编一个出来只会误导调试。 */
         RENDER_SNPRINTF("%s{\"i\":%d,\"en\":%s,\"phase\":\"%s\",\"hold_ms\":%lu,"
                         "\"ratio\":%.2f,\"slip_left\":%s,"
-                        "\"target_us\":%u,\"target_deg\":%.1f,"
-                        "\"cur_us\":%.1f,\"cur_deg\":%.1f,\"reached\":%s}",
+                        "\"target_us\":%u,\"cur_us\":%.1f,\"reached\":%s}",
                         i ? "," : "",
                         i, c->enabled ? "true" : "false", strategy_phase_name(c->phase),
                         (unsigned long)c->hold_ms,
                         (double)c->ratio, c->slip_fast_left ? "true" : "false",
-                        (unsigned)c->target_us,
-                        (double)strategy_us_to_deg(cfg, (uint8_t)i, (float)c->target_us),
-                        (double)c->cur_us,
-                        (double)strategy_us_to_deg(cfg, (uint8_t)i, c->cur_us),
+                        (unsigned)c->target_us, (double)c->cur_us,
                         c->reached ? "true" : "false");
     }
 
-    RENDER_SNPRINTF("],\"cfg\":{\"sim\":%s,\"min_us\":%lu,\"center_us\":%lu,\"max_us\":%lu,"
-                    "\"invert\":[%s,%s],\"manual_us\":[%lu,%lu],\"mode\":\"%s\","
+    RENDER_SNPRINTF("],\"cfg\":{\"sim\":%s,\"unlock_us\":[%lu,%lu],\"lock_us\":[%lu,%lu],"
+                    "\"manual_us\":[%lu,%lu],\"mode\":\"%s\","
                     "\"engage\":%.2f,\"min_rpm\":%.1f,\"hold_ms\":%lu,\"hold_max_ms\":%lu,"
                     "\"probe_ms\":%lu,\"sim_speed\":%lu}}",
                     rs->sim ? "true" : "false",
-                    (unsigned long)cfg->min_us, (unsigned long)cfg->center_us,
-                    (unsigned long)cfg->max_us,
-                    cfg->invert[0] ? "true" : "false", cfg->invert[1] ? "true" : "false",
+                    (unsigned long)cfg->unlock_us[0], (unsigned long)cfg->unlock_us[1],
+                    (unsigned long)cfg->lock_us[0], (unsigned long)cfg->lock_us[1],
                     (unsigned long)cfg->manual_us[0], (unsigned long)cfg->manual_us[1], mode,
                     (double)cfg->slip_engage_ratio, (double)cfg->slip_min_rpm,
                     (unsigned long)cfg->lock_hold_ms, (unsigned long)cfg->lock_hold_max_ms,

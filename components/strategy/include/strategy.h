@@ -1,7 +1,7 @@
 /*
  * strategy：前后差速策略引擎（纯 C，无 IDF 依赖，宿主机可测）。
  *
- * 只负责"该转到什么角度"这一个决策，不碰硬件——真正的 PWM 输出在
+ * 只负责"该出哪个脉宽"这一个决策，不碰硬件——真正的 PWM 输出在
  * 舵机执行器层（servo_act 模拟模型 / servo_drv LEDC 驱动），由 main 按
  * 配置二选一。这样打滑逻辑与舵机模型都能在宿主机上直接跑单测。
  *
@@ -40,13 +40,15 @@ typedef enum {
 } strategy_phase_t;
 
 typedef struct {
-    uint32_t min_us;    /* 脉宽下限（满偏一端） */
-    uint32_t center_us; /* 中位脉宽 = 解锁位置 */
-    uint32_t max_us;    /* 脉宽上限（满偏另一端） */
-    bool invert[STRATEGY_SERVO_COUNT];     /* 反向映射（舵机装反时勾） */
-    bool ch_enabled[STRATEGY_SERVO_COUNT]; /* 通道使能；关=输出中位且不判定 */
+    /* 自动模式的脉宽映射是两档式，不是连续量程：差速器的锁止与释放是两个
+     * 确定的机械位置，中间行程只会让锁不干脆。前后轴各配一组——两轴舵机
+     * 的安装朝向、连杆行程都可能不同，共用量程就得让其中一轴迁就另一轴。
+     * 舵机装反时把该轴这两档填到行程另一端即可，不需要独立的"反向"开关。 */
+    uint32_t unlock_us[STRATEGY_SERVO_COUNT]; /* 解锁档：IDLE/PROBE 时的落点 */
+    uint32_t lock_us[STRATEGY_SERVO_COUNT];   /* 锁定档：LOCKED 时的落点 */
+    bool ch_enabled[STRATEGY_SERVO_COUNT];    /* 通道使能；关=输出解锁档且不判定 */
     strategy_mode_t mode;
-    uint32_t manual_us[STRATEGY_SERVO_COUNT]; /* 手动模式目标脉宽（不应用 invert） */
+    uint32_t manual_us[STRATEGY_SERVO_COUNT]; /* 手动模式目标脉宽（直通，不走两档） */
 
     float slip_engage_ratio; /* 打滑进入门槛（左右速差比例） */
     float slip_min_rpm;      /* 低于此转速不判定：静止时比值无意义 */
@@ -60,7 +62,7 @@ typedef struct {
     uint32_t hold_ms;    /* 本次锁定的保持时长（试探失败逐次翻倍） */
     float ratio;         /* 诊断：最近一次算出的左右速差比例 */
     bool slip_fast_left; /* 诊断：哪一侧更快 */
-    uint16_t target_us;  /* 本周期该输出的目标脉宽；首次 feed 之前为 0（未计算） */
+    uint16_t target_us;  /* 本周期该输出的目标脉宽（两档之一）；首次 feed 之前为 0（未计算） */
 } strategy_servo_state_t;
 
 typedef struct {
@@ -69,7 +71,7 @@ typedef struct {
     strategy_servo_state_t servo[STRATEGY_SERVO_COUNT];
 } strategy_state_t;
 
-/* 填入缺省配置（脉宽 1000/1500/2000、正映射、使能、自动模式、
+/* 填入缺省配置（两档脉宽 解锁 1500 / 锁定 2000、使能、自动模式、
  * 门槛 0.30、最低 10 转/分、保持 3000ms、上限 30000ms、试探 2000ms）。 */
 void strategy_config_default(strategy_config_t *cfg);
 
@@ -84,13 +86,6 @@ esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
                                   const strategy_config_t *cfg, uint32_t now_ms);
 
 esp_err_t strategy_get_state(strategy_state_t *out);
-
-/* 角度→脉宽（纯函数）：deg∈[-90,+90]，0→center，正角趋向 max 端；
- * invert 先取反；超出 ±90 钳位。ch 越界返回 center。 */
-uint32_t strategy_deg_to_us(const strategy_config_t *cfg, uint8_t ch, float deg);
-
-/* 脉宽→角度，与 strategy_deg_to_us 互逆（渲染层回显"到达角度"用）。 */
-float strategy_us_to_deg(const strategy_config_t *cfg, uint8_t ch, float us);
 
 /* RC 通道读捕获脉宽（µs）。二期未接 RC 输入，恒返回 ESP_ERR_NOT_SUPPORTED。 */
 esp_err_t strategy_rc_read(uint8_t channel, uint16_t *us);

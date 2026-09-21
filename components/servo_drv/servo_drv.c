@@ -24,16 +24,19 @@ static esp_err_t ledc_output(servo_ledc_t *s, uint8_t ch)
     return ledc_update_duty(SERVO_LEDC_SPEED_MODE, (ledc_channel_t)ch);
 }
 
-esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear, uint32_t center_us)
+esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear,
+                          const uint32_t unlock_us[SERVO_ACT_CHANNELS])
 {
-    if (s == NULL) {
+    if (s == NULL || unlock_us == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s->inited) {
         return ESP_OK;
     }
-    if (center_us < SERVO_ACT_MIN_US || center_us > SERVO_ACT_MAX_US) {
-        return ESP_ERR_INVALID_ARG;
+    for (int i = 0; i < SERVO_ACT_CHANNELS; i++) {
+        if (unlock_us[i] < SERVO_ACT_MIN_US || unlock_us[i] > SERVO_ACT_MAX_US) {
+            return ESP_ERR_INVALID_ARG;
+        }
     }
 
     ledc_timer_config_t timer = {
@@ -66,7 +69,7 @@ esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear, uint32
             return err;
         }
         s->gpio[i] = gpios[i];
-        s->target_us[i] = center_us;
+        s->target_us[i] = unlock_us[i];
         s->enabled[i] = false;
         /* 建好先停输出：这一刻策略还没跑过第一拍，先让舵机脱力，
          * 免得挂着一个 duty=0 的波形把舵机拽到行程一端。 */

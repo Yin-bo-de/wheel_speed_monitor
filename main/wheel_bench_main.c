@@ -166,11 +166,9 @@ static const telem_collector_ops_t s_wheel_ops = {
 static void strat_cfg_build(const cfg_params_t *cfg, strategy_config_t *out)
 {
     strategy_config_default(out);
-    out->min_us = cfg->servo_min_us;
-    out->center_us = cfg->servo_center_us;
-    out->max_us = cfg->servo_max_us;
     for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
-        out->invert[i] = cfg->servo_invert[i];
+        out->unlock_us[i] = cfg->servo_unlock_us[i];
+        out->lock_us[i] = cfg->servo_lock_us[i];
         out->ch_enabled[i] = cfg->servo_en[i];
         out->manual_us[i] = cfg->servo_manual_us[i];
     }
@@ -196,7 +194,7 @@ static void servo_act_select(bool sim)
             servo_ledc_ops.set_enabled(&s_servo_ledc, 0, false);
             servo_ledc_ops.set_enabled(&s_servo_ledc, 1, false);
             servo_sim_init(&s_servo_sim, (float)s_cfg.servo_sim_speed_us_s,
-                           (uint16_t)s_cfg.servo_center_us);
+                           s_cfg.servo_unlock_us);
         }
         s_act = &s_act_sim;
         s_ledc_failed = false; /* 切回模拟 = 给下一次选择留一次重试机会 */
@@ -208,8 +206,7 @@ static void servo_act_select(bool sim)
     }
     if (!s_servo_ledc.inited) {
         esp_err_t e = servo_ledc_init(&s_servo_ledc, WHEEL_SERVO_GPIO_FRONT,
-                                      WHEEL_SERVO_GPIO_REAR,
-                                      (uint32_t)s_cfg.servo_center_us);
+                                      WHEEL_SERVO_GPIO_REAR, s_cfg.servo_unlock_us);
         if (e != ESP_OK) {
             /* 不静默退回：日志留证，遥测的 src 也会照实报 "sim"，
              * 页面上能直接看出"配置要 LEDC、实际跑模拟"这个不一致。 */
@@ -401,12 +398,13 @@ void app_main(void)
              cfg.wheel_enabled[2], cfg.wheel_enabled[3], cfg.sim_on);
     /* 舵机配置值得单独打一行：升级后这里能直接看出新字段是否落到了预期值
      * （v1 blob 迁移后新字段取默认，一眼可辨） */
-    ESP_LOGI(TAG, "servo: sim=%d mode=%lu en=[%d,%d] us=%lu/%lu/%lu inv=[%d,%d] "
-                  "engage=%.2f minrpm=%.1f hold=%lu/%lu probe=%lu speed=%lu",
+    ESP_LOGI(TAG, "servo: sim=%d mode=%lu en=[%d,%d] 解锁/锁定=[%lu/%lu,%lu/%lu] "
+                  "手动=[%lu,%lu] engage=%.2f minrpm=%.1f hold=%lu/%lu probe=%lu speed=%lu",
              cfg.servo_sim, (unsigned long)cfg.servo_mode,
              cfg.servo_en[0], cfg.servo_en[1],
-             (unsigned long)cfg.servo_min_us, (unsigned long)cfg.servo_center_us,
-             (unsigned long)cfg.servo_max_us, cfg.servo_invert[0], cfg.servo_invert[1],
+             (unsigned long)cfg.servo_unlock_us[0], (unsigned long)cfg.servo_lock_us[0],
+             (unsigned long)cfg.servo_unlock_us[1], (unsigned long)cfg.servo_lock_us[1],
+             (unsigned long)cfg.servo_manual_us[0], (unsigned long)cfg.servo_manual_us[1],
              (double)cfg.slip_engage_ratio, (double)cfg.slip_min_rpm,
              (unsigned long)cfg.lock_hold_ms, (unsigned long)cfg.lock_hold_max_ms,
              (unsigned long)cfg.probe_window_ms,
@@ -428,10 +426,9 @@ void app_main(void)
         memset(&s_units[i].disp, 0, sizeof(s_units[i].disp));
     }
 
-    /* 舵机执行器：起步用模拟模型，起始位置取配置里的中位。
+    /* 舵机执行器：起步用模拟模型，起始位置取配置里的解锁档（上电差速应松开）。
      * 采样任务起来之前初始化，无竞争。 */
-    servo_sim_init(&s_servo_sim, (float)cfg.servo_sim_speed_us_s,
-                   (uint16_t)cfg.servo_center_us);
+    servo_sim_init(&s_servo_sim, (float)cfg.servo_sim_speed_us_s, cfg.servo_unlock_us);
     strategy_init();
 
     /* 注册采集器到 telemetry 框架 */

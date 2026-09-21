@@ -37,7 +37,7 @@ typedef struct {
     const char *src;          /* "sim" / "ledc" */
     bool sim;                 /* 模拟舵机开关（配置回显） */
     uint32_t sim_speed_us_s;  /* 模拟行程速率 µs/s（配置回显） */
-    strategy_config_t cfg;    /* 映射与策略参数（配置回显 + 角度反算） */
+    strategy_config_t cfg;    /* 两档脉宽与策略参数（配置回显） */
     servo_render_chan_t ch[STRATEGY_SERVO_COUNT];
 } servo_render_state_t;
 

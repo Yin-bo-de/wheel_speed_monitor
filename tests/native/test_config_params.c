@@ -115,7 +115,7 @@ static void test_blob_version_field(void)
     TEST_ASSERT_EQUAL_INT(CFG_PARAMS_BLOB_VERSION, blob[0]);
 }
 
-/* 6. v2 舵机默认值 */
+/* 6. 舵机默认值：两档脉宽前后各一组 */
 static void test_servo_defaults(void)
 {
     cfg_params_t cfg;
@@ -123,12 +123,10 @@ static void test_servo_defaults(void)
     TEST_ASSERT_TRUE(cfg.servo_sim);
     for (int i = 0; i < CFG_SERVO_COUNT; i++) {
         TEST_ASSERT_TRUE(cfg.servo_en[i]);
-        TEST_ASSERT_FALSE(cfg.servo_invert[i]);
+        TEST_ASSERT_EQUAL_INT(1500, cfg.servo_unlock_us[i]);
+        TEST_ASSERT_EQUAL_INT(2000, cfg.servo_lock_us[i]);
         TEST_ASSERT_EQUAL_INT(1500, cfg.servo_manual_us[i]);
     }
-    TEST_ASSERT_EQUAL_INT(1000, cfg.servo_min_us);
-    TEST_ASSERT_EQUAL_INT(1500, cfg.servo_center_us);
-    TEST_ASSERT_EQUAL_INT(2000, cfg.servo_max_us);
     TEST_ASSERT_EQUAL_INT(CFG_SERVO_MODE_AUTO, cfg.servo_mode);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.30f, cfg.slip_engage_ratio);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 10.0f, cfg.slip_min_rpm);
@@ -138,35 +136,33 @@ static void test_servo_defaults(void)
     TEST_ASSERT_EQUAL_INT(3000, cfg.servo_sim_speed_us_s);
 }
 
-/* 7. 脉宽三元组必须严格递增：min < center < max（跨字段约束，任一字段被写都要成立） */
-static void test_servo_pulse_triplet(void)
+/* 7. 两档脉宽逐通道判边界：越界即拒；一个通道非法不掩盖另一个通道的合法值 */
+static void test_servo_pulse_bounds(void)
 {
     cfg_params_t cfg;
     cfg_params_default(&cfg);
 
-    cfg.servo_min_us = 500;
-    cfg.servo_center_us = 1500;
-    cfg.servo_max_us = 2500;
-    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_min_us"));
-    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_center_us"));
-    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_max_us"));
+    cfg.servo_unlock_us[0] = CFG_SERVO_US_MIN;
+    cfg.servo_unlock_us[1] = CFG_SERVO_US_MAX;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_unlock_us"));
 
-    cfg.servo_min_us = 499; /* 越下限 */
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_min_us"));
-    cfg.servo_min_us = 1500; /* 等于 center：一侧量程归零 */
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_min_us"));
-    cfg.servo_min_us = 1000;
+    cfg.servo_unlock_us[1] = CFG_SERVO_US_MIN - 1; /* 后轴越下限 */
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_unlock_us"));
 
-    cfg.servo_center_us = 1000; /* 不严格大于 min */
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_center_us"));
-    cfg.servo_center_us = 2500; /* 不严格小于 max */
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_center_us"));
-    cfg.servo_center_us = 1500;
+    cfg.servo_lock_us[0] = CFG_SERVO_US_MAX + 1; /* 前轴越上限 */
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_lock_us"));
+    cfg.servo_lock_us[0] = 1800;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_lock_us"));
 
-    cfg.servo_max_us = 2501; /* 越上限 */
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_max_us"));
-    cfg.servo_max_us = 1500; /* 不严格大于 center */
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_max_us"));
+    /* 两档相同是允许的：该轴锁定时不动，调 PWM 链路时正是要这个 */
+    cfg.servo_lock_us[0] = cfg.servo_unlock_us[0];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_lock_us"));
+
+    /* 手动目标与两档同量程、同判法 */
+    cfg.servo_manual_us[1] = CFG_SERVO_US_MAX + 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_manual_us"));
+    cfg.servo_manual_us[1] = CFG_SERVO_US_MAX;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_manual_us"));
 }
 
 /* 8. 锁定策略与打滑判定参数边界 */
@@ -212,24 +208,19 @@ static void test_lock_policy_bounds(void)
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_mode"));
     cfg.servo_mode = 2;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_mode"));
-
-    cfg.servo_manual_us[0] = 500;
-    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_manual_us"));
-    cfg.servo_manual_us[0] = 2501;
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "servo_manual_us"));
 }
 
-/* 9. v2 打包往返：舵机字段全量保真 */
-static void test_pack_unpack_v2_roundtrip(void)
+/* 9. v3 打包往返：舵机字段全量保真，前后两组两档脉宽互不串位 */
+static void test_pack_unpack_v3_roundtrip(void)
 {
     cfg_params_t a, b;
     cfg_params_default(&a);
     a.servo_sim = false;
     a.servo_en[1] = false;
-    a.servo_min_us = 800;
-    a.servo_center_us = 1450;
-    a.servo_max_us = 2200;
-    a.servo_invert[0] = true;
+    a.servo_unlock_us[0] = 1450;
+    a.servo_unlock_us[1] = 1550;
+    a.servo_lock_us[0] = 2200;
+    a.servo_lock_us[1] = 800; /* 后轴装反：锁定去下限那一端 */
     a.servo_mode = CFG_SERVO_MODE_MANUAL;
     a.servo_manual_us[0] = 1700;
     a.servo_manual_us[1] = 1300;
@@ -248,11 +239,10 @@ static void test_pack_unpack_v2_roundtrip(void)
     TEST_ASSERT_EQUAL_INT(a.servo_sim, b.servo_sim);
     TEST_ASSERT_EQUAL_INT(a.servo_en[0], b.servo_en[0]);
     TEST_ASSERT_EQUAL_INT(a.servo_en[1], b.servo_en[1]);
-    TEST_ASSERT_EQUAL_INT(a.servo_min_us, b.servo_min_us);
-    TEST_ASSERT_EQUAL_INT(a.servo_center_us, b.servo_center_us);
-    TEST_ASSERT_EQUAL_INT(a.servo_max_us, b.servo_max_us);
-    TEST_ASSERT_EQUAL_INT(a.servo_invert[0], b.servo_invert[0]);
-    TEST_ASSERT_EQUAL_INT(a.servo_invert[1], b.servo_invert[1]);
+    for (int i = 0; i < CFG_SERVO_COUNT; i++) {
+        TEST_ASSERT_EQUAL_INT(a.servo_unlock_us[i], b.servo_unlock_us[i]);
+        TEST_ASSERT_EQUAL_INT(a.servo_lock_us[i], b.servo_lock_us[i]);
+    }
     TEST_ASSERT_EQUAL_INT(a.servo_mode, b.servo_mode);
     TEST_ASSERT_EQUAL_INT(a.servo_manual_us[0], b.servo_manual_us[0]);
     TEST_ASSERT_EQUAL_INT(a.servo_manual_us[1], b.servo_manual_us[1]);
@@ -305,9 +295,10 @@ static void test_v1_blob_migrates(void)
 
     cfg_params_t def;
     cfg_params_default(&def);
-    TEST_ASSERT_EQUAL_INT(def.servo_min_us, cfg.servo_min_us);
-    TEST_ASSERT_EQUAL_INT(def.servo_center_us, cfg.servo_center_us);
-    TEST_ASSERT_EQUAL_INT(def.servo_max_us, cfg.servo_max_us);
+    for (int i = 0; i < CFG_SERVO_COUNT; i++) {
+        TEST_ASSERT_EQUAL_INT(def.servo_unlock_us[i], cfg.servo_unlock_us[i]);
+        TEST_ASSERT_EQUAL_INT(def.servo_lock_us[i], cfg.servo_lock_us[i]);
+    }
     TEST_ASSERT_EQUAL_INT(def.lock_hold_ms, cfg.lock_hold_ms);
     TEST_ASSERT_EQUAL_INT(def.lock_hold_max_ms, cfg.lock_hold_max_ms);
     TEST_ASSERT_EQUAL_INT(def.probe_window_ms, cfg.probe_window_ms);
@@ -316,7 +307,63 @@ static void test_v1_blob_migrates(void)
     TEST_ASSERT_TRUE(cfg.servo_sim);
 }
 
-/* 11. 长度不足与未知版本拒绝；恰好 32 字节的 v1 blob 仍是合法输入 */
+/* 按二期（v2）布局手工拼一条 72 字节 blob：共享的 min/center/max + invert 位图。
+ * 同样刻意不复用打包代码——要的是"旧固件写下的字节流"。 */
+static void build_v2_blob(uint8_t buf[72])
+{
+    memset(buf, 0, 72);
+    buf[0] = 2;    /* v2 版本号 */
+    buf[32] = 1;   /* servo_sim */
+    buf[33] = 0x03; /* 位图：两通道都使能 */
+    buf[34] = (uint8_t)(CFG_SERVO_MODE_MANUAL | (0x02 << 4)); /* 低 4 位模式，高 4 位 invert */
+    uint16_t min_us = 800, center_us = 1450, max_us = 2200;
+    memcpy(buf + 35, &min_us, 2);
+    memcpy(buf + 37, &center_us, 2);
+    memcpy(buf + 39, &max_us, 2);
+    uint16_t manual[2] = {1700, 1300};
+    memcpy(buf + 41, manual, 4);
+    float engage = 0.42f, min_rpm = 25.0f;
+    memcpy(buf + 45, &engage, 4);
+    memcpy(buf + 49, &min_rpm, 4);
+    uint32_t hold = 4500, hold_max = 12000, probe = 2500, speed = 800;
+    memcpy(buf + 53, &hold, 4);
+    memcpy(buf + 57, &hold_max, 4);
+    memcpy(buf + 61, &probe, 4);
+    memcpy(buf + 65, &speed, 4);
+}
+
+/* 11. v2 blob 迁移成两档：旧的共享量程换算规则 = 中位作解锁档、
+ * invert 决定锁定档去哪一端。换算前后行为必须逐位等价，升级不用重新标定。 */
+static void test_v2_blob_migrates_to_two_detents(void)
+{
+    uint8_t v2[72];
+    build_v2_blob(v2);
+
+    cfg_params_t cfg;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(v2, sizeof(v2), &cfg));
+
+    for (int i = 0; i < CFG_SERVO_COUNT; i++) {
+        TEST_ASSERT_EQUAL_INT(1450, cfg.servo_unlock_us[i]); /* 旧中位 */
+    }
+    TEST_ASSERT_EQUAL_INT(2200, cfg.servo_lock_us[0]); /* 未反向 → 去上限 */
+    TEST_ASSERT_EQUAL_INT(800, cfg.servo_lock_us[1]);  /* 反向 → 去下限 */
+
+    /* 同段其余字段照常解出，不受迁移影响 */
+    TEST_ASSERT_EQUAL_INT(1700, cfg.servo_manual_us[0]);
+    TEST_ASSERT_EQUAL_INT(1300, cfg.servo_manual_us[1]);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 0.42f, cfg.slip_engage_ratio);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 25.0f, cfg.slip_min_rpm);
+    TEST_ASSERT_EQUAL_INT(4500, cfg.lock_hold_ms);
+    TEST_ASSERT_EQUAL_INT(12000, cfg.lock_hold_max_ms);
+    TEST_ASSERT_EQUAL_INT(2500, cfg.probe_window_ms);
+    TEST_ASSERT_EQUAL_INT(800, cfg.servo_sim_speed_us_s);
+    TEST_ASSERT_EQUAL_INT(CFG_SERVO_MODE_MANUAL, cfg.servo_mode);
+    TEST_ASSERT_TRUE(cfg.servo_sim);
+    TEST_ASSERT_TRUE(cfg.servo_en[0]);
+    TEST_ASSERT_TRUE(cfg.servo_en[1]);
+}
+
+/* 12. 长度不足与未知版本拒绝；各版旧 blob 的合法长度仍照收 */
 static void test_unpack_rejects_bad_len_and_version(void)
 {
     cfg_params_t cfg;
@@ -324,12 +371,12 @@ static void test_unpack_rejects_bad_len_and_version(void)
     cfg_params_default(&cfg);
     cfg_params_pack(&cfg, blob, sizeof(blob));
 
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 71, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, CFG_PARAMS_BLOB_SIZE - 1, &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 0, &cfg));
 
     blob[0] = 0;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
-    blob[0] = 3;
+    blob[0] = 4;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
 
     /* v1 版本号但只有 31 字节：残缺，拒绝 */
@@ -338,11 +385,16 @@ static void test_unpack_rejects_bad_len_and_version(void)
     /* v1 版本号 + 32 字节：旧固件写下的正是这个形态，必须能解 */
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 32, &cfg));
 
+    /* v2 同理：71 字节残缺拒绝，72 字节照收 */
+    blob[0] = 2;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 71, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 72, &cfg));
+
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(NULL, sizeof(blob), &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, sizeof(blob), NULL));
 }
 
-/* 12. 打包缓冲不足与空指针 */
+/* 13. 打包缓冲不足与空指针 */
 static void test_pack_guards(void)
 {
     cfg_params_t cfg;
@@ -361,10 +413,11 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_pack_unpack_roundtrip, "test_pack_unpack_roundtrip", __LINE__);
     UnityDefaultTestRun(test_blob_version_field, "test_blob_version_field", __LINE__);
     UnityDefaultTestRun(test_servo_defaults, "test_servo_defaults", __LINE__);
-    UnityDefaultTestRun(test_servo_pulse_triplet, "test_servo_pulse_triplet", __LINE__);
+    UnityDefaultTestRun(test_servo_pulse_bounds, "test_servo_pulse_bounds", __LINE__);
     UnityDefaultTestRun(test_lock_policy_bounds, "test_lock_policy_bounds", __LINE__);
-    UnityDefaultTestRun(test_pack_unpack_v2_roundtrip, "test_pack_unpack_v2_roundtrip", __LINE__);
+    UnityDefaultTestRun(test_pack_unpack_v3_roundtrip, "test_pack_unpack_v3_roundtrip", __LINE__);
     UnityDefaultTestRun(test_v1_blob_migrates, "test_v1_blob_migrates", __LINE__);
+    UnityDefaultTestRun(test_v2_blob_migrates_to_two_detents, "test_v2_blob_migrates_to_two_detents", __LINE__);
     UnityDefaultTestRun(test_unpack_rejects_bad_len_and_version, "test_unpack_rejects_bad_len_and_version", __LINE__);
     UnityDefaultTestRun(test_pack_guards, "test_pack_guards", __LINE__);
 )

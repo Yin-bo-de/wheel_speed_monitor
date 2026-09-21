@@ -1,6 +1,6 @@
 /*
  * strategy_render 测试：舵机 JSON 块的字段完整性、三态 phase 字符串、
- * 角度反算（含反向映射）、数值格式、缓冲不足、确定性。
+ * 两档脉宽回显、数值格式、缓冲不足、确定性。
  */
 #include <string.h>
 
@@ -55,16 +55,12 @@ static void test_all_required_fields(void)
     assert_contains(buf, "\"ratio\":");
     assert_contains(buf, "\"slip_left\":");
     assert_contains(buf, "\"target_us\":");
-    assert_contains(buf, "\"target_deg\":");
     assert_contains(buf, "\"cur_us\":");
-    assert_contains(buf, "\"cur_deg\":");
     assert_contains(buf, "\"reached\":");
-    /* cfg 回显 */
+    /* cfg 回显：两档脉宽前后各一组 */
     assert_contains(buf, "\"sim\":true");
-    assert_contains(buf, "\"min_us\":1000");
-    assert_contains(buf, "\"center_us\":1500");
-    assert_contains(buf, "\"max_us\":2000");
-    assert_contains(buf, "\"invert\":[");
+    assert_contains(buf, "\"unlock_us\":[1500,1500]");
+    assert_contains(buf, "\"lock_us\":[2000,2000]");
     assert_contains(buf, "\"manual_us\":[");
     assert_contains(buf, "\"engage\":0.30");
     assert_contains(buf, "\"min_rpm\":10.0");
@@ -93,23 +89,17 @@ static void test_phase_strings(void)
     TEST_ASSERT_EQUAL_STRING("probe", strategy_phase_name(STRATEGY_PHASE_PROBE));
 }
 
-/* 3. 角度由脉宽反算：中位 0°、满偏 ±90°、非对称量程也正确 */
-static void test_deg_back_calculation(void)
+/* 3. 每通道的两档脉宽独立回显：前轴换一组，后轴不动 */
+static void test_two_detents_echo_per_channel(void)
 {
     fresh();
-    rs.ch[0].target_us = 2000;
-    rs.ch[0].cur_us = 1250.0f;
+    rs.cfg.unlock_us[0] = 1180;
+    rs.cfg.lock_us[0] = 2120;
     char buf[1024];
     size_t used = 0;
     servo_render_block(&rs, buf, sizeof(buf), &used);
-    assert_contains(buf, "\"target_deg\":90.0");
-    assert_contains(buf, "\"cur_deg\":-45.0");
-
-    /* 反向映射：同样的脉宽给出相反的角度 */
-    rs.cfg.invert[0] = true;
-    servo_render_block(&rs, buf, sizeof(buf), &used);
-    assert_contains(buf, "\"target_deg\":-90.0");
-    assert_contains(buf, "\"cur_deg\":45.0");
+    assert_contains(buf, "\"unlock_us\":[1180,1500]");
+    assert_contains(buf, "\"lock_us\":[2120,2000]");
 }
 
 /* 4. 打滑诊断字段透出 */
@@ -182,7 +172,7 @@ static void test_block_fits_budget(void)
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_all_required_fields, "test_all_required_fields", __LINE__);
     UnityDefaultTestRun(test_phase_strings, "test_phase_strings", __LINE__);
-    UnityDefaultTestRun(test_deg_back_calculation, "test_deg_back_calculation", __LINE__);
+    UnityDefaultTestRun(test_two_detents_echo_per_channel, "test_two_detents_echo_per_channel", __LINE__);
     UnityDefaultTestRun(test_slip_diagnostics, "test_slip_diagnostics", __LINE__);
     UnityDefaultTestRun(test_ledc_and_manual_echo, "test_ledc_and_manual_echo", __LINE__);
     UnityDefaultTestRun(test_buffer_too_small, "test_buffer_too_small", __LINE__);

@@ -254,8 +254,30 @@ static esp_err_t handle_set_cfg(const char *payload)
         }                                                                                 \
     } while (0)
 
+    /* 数字数组：全部元素落进 next 后一次性校验（逐元素判边界，见 config_params）。
+     * 与 TRY_U32 一样，任一元素不合法即整条命令拒绝。 */
+#define TRY_U32_ARRAY(field, member, count)                                               \
+    do {                                                                                  \
+        if ((j = cJSON_GetObjectItemCaseSensitive(root, field)) != NULL &&                \
+            cJSON_IsArray(j)) {                                                           \
+            for (int k_ = 0; k_ < (count); k_++) {                                        \
+                if (k_ < cJSON_GetArraySize(j)) {                                         \
+                    cJSON *it_ = cJSON_GetArrayItem(j, k_);                               \
+                    if (cJSON_IsNumber(it_)) {                                            \
+                        next.member[k_] = (uint32_t)it_->valueint;                        \
+                    }                                                                     \
+                }                                                                         \
+            }                                                                             \
+            if (cfg_params_validate(&next, field) != ESP_OK) {                            \
+                err_msg = field " out of range";                                          \
+                result = ESP_ERR_INVALID_ARG;                                             \
+                goto done;                                                                \
+            }                                                                             \
+            changed = true;                                                               \
+        }                                                                                 \
+    } while (0)
+
     TRY_BOOLS("servo_en", servo_en, CFG_SERVO_COUNT);
-    TRY_BOOLS("servo_invert", servo_invert, CFG_SERVO_COUNT);
 
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "servo_sim")) != NULL && cJSON_IsBool(j)) {
         next.servo_sim = cJSON_IsTrue(j);
@@ -277,28 +299,11 @@ static esp_err_t handle_set_cfg(const char *payload)
         changed = true;
     }
 
-    /* 手动目标脉宽是数组：全部落进 next 后一次性校验逐个元素 */
-    if ((j = cJSON_GetObjectItemCaseSensitive(root, "servo_manual_us")) != NULL &&
-        cJSON_IsArray(j)) {
-        for (int i = 0; i < CFG_SERVO_COUNT; i++) {
-            if (i < cJSON_GetArraySize(j)) {
-                cJSON *item = cJSON_GetArrayItem(j, i);
-                if (cJSON_IsNumber(item)) {
-                    next.servo_manual_us[i] = (uint32_t)item->valueint;
-                }
-            }
-        }
-        if (cfg_params_validate(&next, "servo_manual_us") != ESP_OK) {
-            err_msg = "servo_manual_us out of range";
-            result = ESP_ERR_INVALID_ARG;
-            goto done;
-        }
-        changed = true;
-    }
+    /* 三组脉宽都是每通道数组：前后轴各自一组 */
+    TRY_U32_ARRAY("servo_unlock_us", servo_unlock_us, CFG_SERVO_COUNT);
+    TRY_U32_ARRAY("servo_lock_us", servo_lock_us, CFG_SERVO_COUNT);
+    TRY_U32_ARRAY("servo_manual_us", servo_manual_us, CFG_SERVO_COUNT);
 
-    TRY_U32("servo_min_us", servo_min_us);
-    TRY_U32("servo_center_us", servo_center_us);
-    TRY_U32("servo_max_us", servo_max_us);
     TRY_F32("slip_engage_ratio", slip_engage_ratio);
     TRY_F32("slip_min_rpm", slip_min_rpm);
     TRY_U32("lock_hold_ms", lock_hold_ms);
@@ -309,6 +314,7 @@ static esp_err_t handle_set_cfg(const char *payload)
 #undef TRY_U32
 #undef TRY_F32
 #undef TRY_BOOLS
+#undef TRY_U32_ARRAY
 
     if (changed) {
         *cfg = next;

@@ -25,13 +25,12 @@ void strategy_config_default(strategy_config_t *cfg)
         return;
     }
     memset(cfg, 0, sizeof(*cfg));
-    cfg->min_us = 1000;
-    cfg->center_us = 1500;
-    cfg->max_us = 2000;
     cfg->mode = STRATEGY_MODE_AUTO;
     for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
         cfg->ch_enabled[i] = true;
-        cfg->manual_us[i] = cfg->center_us;
+        cfg->unlock_us[i] = 1500;
+        cfg->lock_us[i] = 2000;
+        cfg->manual_us[i] = cfg->unlock_us[i];
     }
     cfg->slip_engage_ratio = 0.30f;
     cfg->slip_min_rpm = 10.0f;
@@ -46,54 +45,6 @@ esp_err_t strategy_init(void)
     memset(s_rpm, 0, sizeof(s_rpm));
     s_mode = STRATEGY_MODE_AUTO;
     return ESP_OK;
-}
-
-uint32_t strategy_deg_to_us(const strategy_config_t *cfg, uint8_t ch, float deg)
-{
-    if (cfg == NULL) {
-        return 0;
-    }
-    if (ch >= STRATEGY_SERVO_COUNT) {
-        return cfg->center_us; /* 越界退回中位，不越界读 invert[] */
-    }
-
-    float d = cfg->invert[ch] ? -deg : deg;
-    if (d > 90.0f) {
-        d = 90.0f;
-    } else if (d < -90.0f) {
-        d = -90.0f;
-    }
-
-    /* 中位两侧量程可能不等（min/center/max 各自可配），分段映射 */
-    float us;
-    if (d >= 0.0f) {
-        us = (float)cfg->center_us + (d / 90.0f) * (float)(cfg->max_us - cfg->center_us);
-    } else {
-        us = (float)cfg->center_us + (d / 90.0f) * (float)(cfg->center_us - cfg->min_us);
-    }
-    return (uint32_t)(us + 0.5f);
-}
-
-float strategy_us_to_deg(const strategy_config_t *cfg, uint8_t ch, float us)
-{
-    if (cfg == NULL || ch >= STRATEGY_SERVO_COUNT) {
-        return 0.0f;
-    }
-
-    float deg;
-    if (us >= (float)cfg->center_us) {
-        int span = (int)cfg->max_us - (int)cfg->center_us;
-        deg = (span > 0) ? (us - (float)cfg->center_us) / (float)span * 90.0f : 0.0f;
-    } else {
-        int span = (int)cfg->center_us - (int)cfg->min_us;
-        deg = (span > 0) ? (us - (float)cfg->center_us) / (float)span * 90.0f : 0.0f;
-    }
-    if (deg > 90.0f) {
-        deg = 90.0f;
-    } else if (deg < -90.0f) {
-        deg = -90.0f;
-    }
-    return cfg->invert[ch] ? -deg : deg;
 }
 
 esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
@@ -127,12 +78,12 @@ esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
             a->phase = STRATEGY_PHASE_IDLE;
             a->hold_ms = 0;
             a->phase_since_ms = now_ms;
-            a->target_us = (uint16_t)cfg->center_us;
+            a->target_us = (uint16_t)cfg->unlock_us[axle];
             continue;
         }
 
-        /* 手动模式直设脉宽，不跑打滑判定（也刻意不应用 invert——
-         * 手动是用来验证 PWM 链路本身的，映射规律留到自动模式看） */
+        /* 手动模式直设脉宽，不跑打滑判定（也刻意不走两档——
+         * 手动是用来验证 PWM 链路本身的，两档映射留到自动模式看） */
         if (cfg->mode == STRATEGY_MODE_MANUAL) {
             a->phase = STRATEGY_PHASE_IDLE;
             a->hold_ms = 0;
@@ -184,9 +135,12 @@ esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
             break;
         }
 
-        a->target_us = (a->phase == STRATEGY_PHASE_LOCKED)
-                           ? (uint16_t)strategy_deg_to_us(cfg, axle, 90.0f)
-                           : (uint16_t)cfg->center_us;
+        /* 两档映射：只有锁定相位去锁定档，其余（解锁/试探）都在解锁档。
+         * 试探期本就该"松开看会不会再打滑"，落点与解锁一致是策略的一部分，
+         * 不是缺省值。 */
+        a->target_us = (uint16_t)((a->phase == STRATEGY_PHASE_LOCKED)
+                                      ? cfg->lock_us[axle]
+                                      : cfg->unlock_us[axle]);
     }
 
     return ESP_OK;
