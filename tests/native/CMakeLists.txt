@@ -38,6 +38,7 @@ set(SERVO_ACT_SRCS
 )
 set(RC_INPUT_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/rc_input/rc_input.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/rc_input/rc_render.c
 )
 set(MAIN_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main/config_params.c
@@ -76,3 +77,4 @@ add_native_test(strategy ${STRATEGY_SRCS})
 add_native_test(servo_sim ${SERVO_ACT_SRCS})
 add_native_test(strategy_render ${STRATEGY_SRCS})
 add_native_test(rc_input ${RC_INPUT_SRCS})
+add_native_test(rc_render ${RC_INPUT_SRCS})
