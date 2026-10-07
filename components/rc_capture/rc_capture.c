@@ -65,22 +65,24 @@ esp_err_t rc_capture_init(rc_capture_t *cap, const int gpio[RC_CAPTURE_CH_COUNT]
     };
     ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "gpio_config failed");
 
-    /* ISR 服务由 wheel_sensor 先装过；重复安装返回 INVALID_STATE，属正常 */
-    esp_err_t e = gpio_install_isr_service(0);
-    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
-        ESP_RETURN_ON_ERROR(e, TAG, "isr service install failed");
-    }
-
-    /* 绑实例要在挂 handler 之前：handler 一挂上，中断随时可能进来 */
-    s_isr_cap = cap;
+    /* 先直接挂 handler：ISR 服务由 wheel_sensor 早就装好了，这一步会成功。
+     * 不去无脑调 gpio_install_isr_service——它对"已安装"只回一行 ESP_LOGE，
+     * 启动日志里会多出一条看着像故障的 E 行。真没装（本组件被单独使用时）
+     * 才补装一次。 */
+    s_isr_cap = cap; /* 绑实例要在挂 handler 之前：handler 一挂上中断随时可能进来 */
     for (int i = 0; i < RC_CAPTURE_CH_COUNT; i++) {
-        ESP_RETURN_ON_ERROR(
-            gpio_isr_handler_add((gpio_num_t)cap->gpio[i], rc_pulse_isr, (void *)(uintptr_t)i),
-            TAG, "isr handler add failed");
+        esp_err_t e =
+            gpio_isr_handler_add((gpio_num_t)cap->gpio[i], rc_pulse_isr, (void *)(uintptr_t)i);
+        if (e == ESP_ERR_INVALID_STATE) {
+            ESP_RETURN_ON_ERROR(gpio_install_isr_service(0), TAG, "isr service install failed");
+            e = gpio_isr_handler_add((gpio_num_t)cap->gpio[i], rc_pulse_isr, (void *)(uintptr_t)i);
+        }
+        ESP_RETURN_ON_ERROR(e, TAG, "isr handler add failed");
         ESP_RETURN_ON_ERROR(gpio_set_intr_type((gpio_num_t)cap->gpio[i], GPIO_INTR_ANYEDGE),
                             TAG, "set intr type failed");
     }
     cap->inited = true;
+    ESP_LOGI(TAG, "RC 捕获就绪 模式=GPIO%d 前=%d 后=%d", cap->gpio[0], cap->gpio[1], cap->gpio[2]);
     return ESP_OK;
 }
 
