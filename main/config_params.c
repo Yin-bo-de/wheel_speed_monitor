@@ -32,6 +32,13 @@ void cfg_params_default(cfg_params_t *cfg)
     cfg->lock_hold_max_ms = 30000;
     cfg->probe_window_ms = 2000;
     cfg->servo_sim_speed_us_s = 3000;
+
+    cfg->rc_sim = false;
+    /* 模式通道给 1000（自动区）：打开遥控模拟时不该平白把差速锁从自动改成手动，
+     * 想让遥控接管就自己把滑杆推过 1500 */
+    cfg->rc_sim_us[0] = 1000;
+    cfg->rc_sim_us[1] = 1500;
+    cfg->rc_sim_us[2] = 1500;
 }
 
 /* 脉宽数组（两档与手动目标同量程）：逐元素判边界，前后轴互不牵连——
@@ -113,6 +120,14 @@ esp_err_t cfg_params_validate(const cfg_params_t *cfg, const char *field)
         if (cfg->servo_sim_speed_us_s < CFG_SIM_SPEED_MIN ||
             cfg->servo_sim_speed_us_s > CFG_SIM_SPEED_MAX) {
             return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "rc_sim_us") == 0) {
+        /* 与舵机脉宽同量程：模拟值最终要不经换算地喂进 rc_input，
+         * 那里的量程校验就是这一条，两边保持同一个边界 */
+        for (int i = 0; i < CFG_RC_CH_COUNT; i++) {
+            if (cfg->rc_sim_us[i] < CFG_SERVO_US_MIN || cfg->rc_sim_us[i] > CFG_SERVO_US_MAX) {
+                return ESP_ERR_INVALID_ARG;
+            }
         }
     }
     /* en/sim/sim_rpm/servo_en 为 bool 数组，JSON 解析层负责类型约束 */
@@ -251,6 +266,32 @@ static void unpack_v2_segment(const uint8_t *buf, cfg_params_t *out)
     memcpy(&out->servo_sim_speed_us_s, buf + 65, 4);
 }
 
+/* ---- v4 段（76..83）：遥控输入 ----
+ * 追加在 v3 段之后，v1/v3 两段的偏移一个字节都不动：旧固件写下的 blob
+ * 在新固件里逐字节可解，新固件写下的 blob 交给旧固件也只会被版本号挡住。 */
+
+static void pack_v4_segment(const cfg_params_t *cfg, uint8_t *buf)
+{
+    uint16_t sim[CFG_RC_CH_COUNT];
+    for (int i = 0; i < CFG_RC_CH_COUNT; i++) {
+        sim[i] = (uint16_t)cfg->rc_sim_us[i];
+    }
+    buf[76] = cfg->rc_sim ? 1 : 0;
+    memcpy(buf + 77, sim, sizeof(sim));
+    /* 83 保留 */
+}
+
+static void unpack_v4_segment(const uint8_t *buf, cfg_params_t *out)
+{
+    uint16_t sim[CFG_RC_CH_COUNT] = {0};
+
+    out->rc_sim = buf[76] != 0;
+    memcpy(sim, buf + 77, sizeof(sim));
+    for (int i = 0; i < CFG_RC_CH_COUNT; i++) {
+        out->rc_sim_us[i] = sim[i];
+    }
+}
+
 esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
 {
     if (cfg == NULL || buf == NULL || len < CFG_PARAMS_BLOB_SIZE) {
@@ -259,6 +300,7 @@ esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
     memset(buf, 0, CFG_PARAMS_BLOB_SIZE);
     pack_v1_segment(cfg, buf);
     pack_v3_segment(cfg, buf);
+    pack_v4_segment(cfg, buf);
     return ESP_OK;
 }
 
@@ -287,12 +329,21 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v2_segment(buf, out); /* 旧布局，按旧语义换算成两档 */
         return ESP_OK;
     }
+    if (buf[0] == CFG_PARAMS_BLOB_VERSION_3) {
+        if (len < CFG_PARAMS_BLOB_SIZE_V3) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        unpack_v1_segment(buf, out);
+        unpack_v3_segment(buf, out);
+        return ESP_OK; /* 遥控字段保持默认；上层随后回写最新版 */
+    }
     if (buf[0] == CFG_PARAMS_BLOB_VERSION) {
         if (len < CFG_PARAMS_BLOB_SIZE) {
             return ESP_ERR_INVALID_ARG;
         }
         unpack_v1_segment(buf, out);
         unpack_v3_segment(buf, out);
+        unpack_v4_segment(buf, out);
         return ESP_OK;
     }
     return ESP_ERR_INVALID_VERSION;

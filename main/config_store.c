@@ -34,8 +34,8 @@ esp_err_t config_store_load(cfg_params_t *out)
         if (ue != ESP_OK) {
             return ue;
         }
-        /* 读到旧版 blob（一期固件写下的 v1）：解出的新字段是默认值，
-         * 立刻回写 v2，之后 NVS 恒为最新布局，不必每次上电都迁移一次。 */
+        /* 读到旧版 blob：解出的新字段是默认值，立刻回写最新版，
+         * 之后 NVS 恒为最新布局，不必每次上电都迁移一次。 */
         if (blob[0] != CFG_PARAMS_BLOB_VERSION) {
             ESP_LOGW(TAG, "config blob v%u migrated to v%d", (unsigned)blob[0],
                      CFG_PARAMS_BLOB_VERSION);

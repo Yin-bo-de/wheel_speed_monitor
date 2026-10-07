@@ -376,7 +376,7 @@ static void test_unpack_rejects_bad_len_and_version(void)
 
     blob[0] = 0;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
-    blob[0] = 4;
+    blob[0] = 5; /* 比当前版本更新 → 认不出来，拒绝 */
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
 
     /* v1 版本号但只有 31 字节：残缺，拒绝 */
@@ -389,6 +389,11 @@ static void test_unpack_rejects_bad_len_and_version(void)
     blob[0] = 2;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 71, &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 72, &cfg));
+
+    /* v3：75 字节残缺拒绝，76 字节照收（遥控字段随后取默认） */
+    blob[0] = 3;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 75, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 76, &cfg));
 
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(NULL, sizeof(blob), &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, sizeof(blob), NULL));
@@ -406,6 +411,114 @@ static void test_pack_guards(void)
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_pack(&cfg, NULL, sizeof(blob)));
 }
 
+/* 按三期（v3）布局手工拼一条 76 字节 blob：每通道两档脉宽。
+ * 同样刻意不复用打包代码——要的是"旧固件写下的字节流"。 */
+static void build_v3_blob(uint8_t buf[76])
+{
+    memset(buf, 0, 76);
+    buf[0] = 3;     /* v3 版本号 */
+    buf[32] = 0;    /* servo_sim = false（走 LEDC） */
+    buf[33] = 0x01; /* 位图：只启用前轴 */
+    buf[34] = CFG_SERVO_MODE_MANUAL;
+    uint16_t unlock[2] = {1450, 1550};
+    uint16_t lock[2] = {2200, 800};
+    uint16_t manual[2] = {1700, 1300};
+    memcpy(buf + 35, unlock, 4);
+    memcpy(buf + 39, lock, 4);
+    memcpy(buf + 43, manual, 4);
+    float engage = 0.42f, min_rpm = 25.0f;
+    memcpy(buf + 47, &engage, 4);
+    memcpy(buf + 51, &min_rpm, 4);
+    uint32_t hold = 4500, hold_max = 12000, probe = 2500, speed = 800;
+    memcpy(buf + 55, &hold, 4);
+    memcpy(buf + 59, &hold_max, 4);
+    memcpy(buf + 63, &probe, 4);
+    memcpy(buf + 67, &speed, 4);
+}
+
+/* 14. v3 blob 迁移：舵机字段原样解出，遥控字段取默认（升级不丢配置也不误开遥控） */
+static void test_v3_blob_migrates(void)
+{
+    uint8_t v3[76];
+    build_v3_blob(v3);
+
+    cfg_params_t cfg;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(v3, sizeof(v3), &cfg));
+
+    TEST_ASSERT_EQUAL_INT(1450, cfg.servo_unlock_us[0]);
+    TEST_ASSERT_EQUAL_INT(1550, cfg.servo_unlock_us[1]);
+    TEST_ASSERT_EQUAL_INT(2200, cfg.servo_lock_us[0]);
+    TEST_ASSERT_EQUAL_INT(800, cfg.servo_lock_us[1]);
+    TEST_ASSERT_EQUAL_INT(1700, cfg.servo_manual_us[0]);
+    TEST_ASSERT_EQUAL_INT(CFG_SERVO_MODE_MANUAL, cfg.servo_mode);
+    TEST_ASSERT_FALSE(cfg.servo_sim);
+    TEST_ASSERT_TRUE(cfg.servo_en[0]);
+    TEST_ASSERT_FALSE(cfg.servo_en[1]);
+
+    cfg_params_t def;
+    cfg_params_default(&def);
+    TEST_ASSERT_EQUAL_INT(def.rc_sim, cfg.rc_sim);
+    for (int i = 0; i < CFG_RC_CH_COUNT; i++) {
+        TEST_ASSERT_EQUAL_INT(def.rc_sim_us[i], cfg.rc_sim_us[i]);
+    }
+}
+
+/* 15. 遥控字段默认值：模拟关，模式通道落在自动区 */
+static void test_rc_defaults(void)
+{
+    cfg_params_t cfg;
+    cfg_params_default(&cfg);
+    TEST_ASSERT_FALSE(cfg.rc_sim);
+    TEST_ASSERT_EQUAL_INT(1000, cfg.rc_sim_us[0]); /* 自动区：开模拟不改现状 */
+    TEST_ASSERT_EQUAL_INT(1500, cfg.rc_sim_us[1]);
+    TEST_ASSERT_EQUAL_INT(1500, cfg.rc_sim_us[2]);
+}
+
+/* 16. 三路模拟脉宽逐元素判边界（与舵机脉宽同量程） */
+static void test_rc_sim_us_bounds(void)
+{
+    cfg_params_t cfg;
+    cfg_params_default(&cfg);
+
+    cfg.rc_sim_us[0] = CFG_SERVO_US_MIN;
+    cfg.rc_sim_us[1] = CFG_SERVO_US_MAX;
+    cfg.rc_sim_us[2] = 1500;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "rc_sim_us"));
+
+    cfg.rc_sim_us[2] = CFG_SERVO_US_MIN - 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "rc_sim_us"));
+    cfg.rc_sim_us[2] = CFG_SERVO_US_MAX + 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "rc_sim_us"));
+    cfg.rc_sim_us[2] = 1500;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "rc_sim_us"));
+}
+
+/* 17. v4 往返：遥控三路互不串位，v3 段字段同时保真 */
+static void test_pack_unpack_v4_roundtrip(void)
+{
+    cfg_params_t a, b;
+    cfg_params_default(&a);
+    a.rc_sim = true;
+    a.rc_sim_us[0] = 1750;
+    a.rc_sim_us[1] = 1200;
+    a.rc_sim_us[2] = 2400;
+    a.servo_lock_us[1] = 900;
+    a.lock_hold_ms = 4500;
+
+    uint8_t blob[CFG_PARAMS_BLOB_SIZE];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_pack(&a, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL_INT(CFG_PARAMS_BLOB_VERSION, blob[0]);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, sizeof(blob), &b));
+
+    TEST_ASSERT_TRUE(b.rc_sim);
+    TEST_ASSERT_EQUAL_INT(1750, b.rc_sim_us[0]);
+    TEST_ASSERT_EQUAL_INT(1200, b.rc_sim_us[1]);
+    TEST_ASSERT_EQUAL_INT(2400, b.rc_sim_us[2]);
+    /* v3 段跟着一起保真：新段没有挤掉旧段的偏移 */
+    TEST_ASSERT_EQUAL_INT(900, b.servo_lock_us[1]);
+    TEST_ASSERT_EQUAL_INT(4500, b.lock_hold_ms);
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_defaults, "test_defaults", __LINE__);
     UnityDefaultTestRun(test_bounds, "test_bounds", __LINE__);
@@ -418,6 +531,10 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_pack_unpack_v3_roundtrip, "test_pack_unpack_v3_roundtrip", __LINE__);
     UnityDefaultTestRun(test_v1_blob_migrates, "test_v1_blob_migrates", __LINE__);
     UnityDefaultTestRun(test_v2_blob_migrates_to_two_detents, "test_v2_blob_migrates_to_two_detents", __LINE__);
+    UnityDefaultTestRun(test_v3_blob_migrates, "test_v3_blob_migrates", __LINE__);
+    UnityDefaultTestRun(test_rc_defaults, "test_rc_defaults", __LINE__);
+    UnityDefaultTestRun(test_rc_sim_us_bounds, "test_rc_sim_us_bounds", __LINE__);
+    UnityDefaultTestRun(test_pack_unpack_v4_roundtrip, "test_pack_unpack_v4_roundtrip", __LINE__);
     UnityDefaultTestRun(test_unpack_rejects_bad_len_and_version, "test_unpack_rejects_bad_len_and_version", __LINE__);
     UnityDefaultTestRun(test_pack_guards, "test_pack_guards", __LINE__);
 )

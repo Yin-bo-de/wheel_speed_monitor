@@ -3,11 +3,11 @@
  * 配置存储由 main 的 config_store 负责（NVS 薄封装），这里只做：
  * 默认值、逐字段校验、NVS blob 打包/解包。
  *
- * blob 版本迁移：v1（32B）是一期的布局；v2（72B）在尾部追加舵机与
- * 锁定策略参数；v3（72B）把舵机脉宽从"共享的 min/center/max + invert"
- * 换成"每通道的解锁/锁定两档"。解包按首字节版本号分派——旧 blob 仍可解，
- * 缺失字段取默认值（v2 还要按旧语义换算，见 cfg_params_unpack），
- * 上层解出后回写最新版，升级不丢用户已设的配置。
+ * blob 版本迁移：v1（32B）是一期的布局；v2（72B）在尾部追加舵机与锁定策略
+ * 参数；v3（76B）把舵机脉宽从"共享的 min/center/max + invert"换成"每通道的
+ * 解锁/锁定两档"；v4（84B）在尾部追加遥控输入（模拟开关与三路模拟脉宽）。
+ * 解包按首字节版本号分派——旧 blob 仍可解，缺失字段取默认值（v2 还要按旧
+ * 语义换算，见 cfg_params_unpack），上层解出后回写最新版，升级不丢用户已设的配置。
  */
 #ifndef CONFIG_PARAMS_H
 #define CONFIG_PARAMS_H
@@ -24,6 +24,7 @@ extern "C" {
 
 #define CFG_WHEEL_COUNT 4
 #define CFG_SERVO_COUNT 2 /* 0=前差速 1=后差速 */
+#define CFG_RC_CH_COUNT 3 /* 遥控三路：0=模式 1=前差速 2=后差速（与 rc_input 顺序一致） */
 
 #define CFG_MAGNETS_MIN 1
 #define CFG_MAGNETS_MAX 16
@@ -56,14 +57,17 @@ extern "C" {
  *               + unlock_us(u16×2) + lock_us(u16×2) + manual_us(u16×2)
  *               + engage/min_rpm(float×2) + lock_hold/max/probe(u32×3)
  *               + sim_speed(u32) + 保留(5B)
+ *   v4 段 76..83：rc_sim(1B) + rc_sim_us(u16×3) + 保留(1B)
  * v2 段（32..71）与 v3 段是同义不同形：v2 用共享的 min/center/max + invert
  * 位图描述脉宽，v3 换成每通道两档，因此长 4 字节、其余字段偏移整体后移。 */
-#define CFG_PARAMS_BLOB_VERSION 3
-#define CFG_PARAMS_BLOB_SIZE 76
+#define CFG_PARAMS_BLOB_VERSION 4
+#define CFG_PARAMS_BLOB_SIZE 84
 #define CFG_PARAMS_BLOB_VERSION_1 1
 #define CFG_PARAMS_BLOB_SIZE_V1 32
 #define CFG_PARAMS_BLOB_VERSION_2 2
 #define CFG_PARAMS_BLOB_SIZE_V2 72
+#define CFG_PARAMS_BLOB_VERSION_3 3
+#define CFG_PARAMS_BLOB_SIZE_V3 76
 
 typedef struct {
     uint32_t magnets;    /* 每转磁铁数 1-16 */
@@ -92,6 +96,12 @@ typedef struct {
     uint32_t lock_hold_max_ms; /* 保持时长翻倍上限 */
     uint32_t probe_window_ms;  /* 试探窗口：车连续动满此时长才算脱困 */
     uint32_t servo_sim_speed_us_s; /* 模拟舵机行程速率（µs/秒） */
+
+    /* ---- v4：遥控输入 ---- */
+    bool rc_sim; /* true=注入模拟遥控信号；false=读 GPIO 上的真实捕获 */
+    /* 三路模拟脉宽，顺序同 rc_input：模式 / 前差速 / 后差速。
+     * 模式通道默认落在自动区（1000），打开模拟不会平白把模式翻成手动。 */
+    uint32_t rc_sim_us[CFG_RC_CH_COUNT];
 } cfg_params_t;
 
 void cfg_params_default(cfg_params_t *cfg);
