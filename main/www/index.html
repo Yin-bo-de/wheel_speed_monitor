@@ -97,6 +97,14 @@
     <p class="hint">锁定期间刻意不看轮速差——锁上之后两轮被强制同步，速差会被动作本身抹平。所以保持期走完先松开试探；
       试探窗口数的是「车轮动/停状态保持不变」的时长，中途状态翻转就重新计时。</p>
   </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>遥控输入 <span class="note" id="rc-src">—</span></h2>
+    <div id="rc-chans"></div>
+    <div class="row" style="margin-top:8px"><span>生效模式</span><b id="rc-mode">—</b></div>
+    <p class="hint">模式通道 ≥1500µs 判手动：前后差速原样透传遥控脉宽；&lt;1500µs 判自动：忽略遥控，按轮速算法。
+      任一路超时（100ms 没收到脉冲）即判丢信号，那一处单独回落设置页配置，不影响其余通道。</p>
+  </div>
 </section>
 
 <section id="view-settings" hidden>
@@ -183,6 +191,25 @@
     <div style="margin-top:10px"><button id="servo-apply">应用舵机配置</button></div>
   </div>
 
+  <div class="card" style="margin-top:12px" data-echo-group="rc">
+    <h2>遥控模拟 <span class="note">(验证台注入三路 RC 脉宽)</span></h2>
+    <label style="display:block;margin-bottom:8px">
+      <input type="checkbox" id="rc-sim"> 启用模拟遥控信号
+      <span class="note">（关掉 = 没有接收机：三路按超时失效，模式与目标回落设置页配置）</span>
+    </label>
+    <div class="cfg-grid">
+      <div><label>模式通道(µs) <b id="rcm0v">1000</b> <span class="note" id="rcm0zone">自动区</span></label>
+        <input id="rcm0" type="range" min="500" max="2500" step="10" value="1000"></div>
+      <div><label>前差速通道(µs) <b id="rcm1v">1500</b></label>
+        <input id="rcm1" type="range" min="500" max="2500" step="10" value="1500"></div>
+      <div><label>后差速通道(µs) <b id="rcm2v">1500</b></label>
+        <input id="rcm2" type="range" min="500" max="2500" step="10" value="1500"></div>
+    </div>
+    <div style="margin-top:8px"><button id="rc-apply">应用遥控模拟</button></div>
+    <p class="hint">滑杆步进 10，能精确停在 1490 与 1500，手动/自动的分界在页面上直接就能验。
+      接真接收机时这个开关要保持关闭——打开会把 GPIO38/39/40 上的真实信号盖掉。</p>
+  </div>
+
   <div class="card disabled" style="margin-top:12px">
     <h2>预留：画面回传展示信息选择 <span class="note">(二期)</span></h2>
     <p class="hint">二期摄像头启用后，在这里选回传画面上叠加哪些信息（轮速/姿态/舵机状态等）。</p>
@@ -192,15 +219,23 @@
 
 <script>
 "use strict";
-const WHEEL = 4, SERVO = 2, WS_URL = "ws://" + location.host + "/ws", API = "/api/status";
+const WHEEL = 4, SERVO = 2, RC_CH = 3, WS_URL = "ws://" + location.host + "/ws", API = "/api/status";
 const wheelNames = ["左前", "右前", "左后", "右后"];
 const servoNames = ["前差速", "后差速"];
+const rcNames = ["模式通道", "前差速通道", "后差速通道"];
+/* 报的是"实际在跑的捕获源"：配置要真捕获但初始化失败时会显示成最后一条，
+ * 那是必须让人看见的不一致，标红而不是悄悄显示成模拟 */
+const RC_SRC_TEXT = {
+  gpio: "实际捕获：GPIO38/39/40 边沿中断",
+  sim: "实际来源：模拟注入",
+  none: "捕获未起来（三路按无信号）",
+};
 const cols = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373"];
 const PHASE_TEXT = { idle: "已解锁", locked: "锁定中", probe: "试探中" };
 let ws = null, reconnect = 0, lastFrame = null, activeTab = "monitor";
 const hist = { t: [], rpm: [[], [], [], []] };
 /* 用户正在编辑的卡片组：回显先跳过，免得 100ms 一帧把输入踩掉 */
-const dirty = { cfg: false, sim: false, servo: false };
+const dirty = { cfg: false, sim: false, servo: false, rc: false };
 
 function $(id) { return document.getElementById(id); }
 function fmt(x, d) { return (x === null || x === undefined || isNaN(x)) ? "—" : Number(x).toFixed(d); }
@@ -267,6 +302,22 @@ function buildPanels() {
     const sl = $("man" + i), out = $("man" + i + "v");
     sl.addEventListener("input", () => { out.textContent = sl.value; });
   }
+
+  const rc = $("rc-chans");
+  for (let i = 0; i < RC_CH; i++) {
+    const d = document.createElement("div");
+    d.className = "row";
+    d.innerHTML = `<span>${rcNames[i]}</span><b id="rcu${i}">—</b><span class="note" id="rcs${i}"></span>`;
+    rc.appendChild(d);
+  }
+  /* 模式通道的滑杆旁边直接标出落在哪个区：判定的分界在 1500 */
+  for (let i = 0; i < RC_CH; i++) {
+    const sl = $("rcm" + i), out = $("rcm" + i + "v");
+    sl.addEventListener("input", () => {
+      out.textContent = sl.value;
+      if (i === 0) $("rcm0zone").textContent = (Number(sl.value) >= 1500) ? "手动区" : "自动区";
+    });
+  }
 }
 
 function showTab(name) {
@@ -313,6 +364,7 @@ function echoChk(el, v) {
 function applyFrame(f) {
   const wheels = f.collectors && f.collectors.find(c => c.type === "wheel_speed");
   const servo = f.collectors && f.collectors.find(c => c.type === "servo");
+  const rc = f.collectors && f.collectors.find(c => c.type === "rc");
 
   if (wheels) $("src").textContent = (wheels.src === "sim") ? "模拟" : "PCNT 霍尔";
   else if (servo) $("src").textContent = (servo.src === "sim") ? "模拟" : "LEDC";
@@ -327,6 +379,7 @@ function applyFrame(f) {
 
   if (wheels) renderWheels(wheels);
   if (servo) renderServo(servo);
+  if (rc) renderRc(rc);
 
   if (wheels) {
     const t = f.t || 0;
@@ -384,7 +437,9 @@ function renderServo(sv) {
     const badge = $("sphase" + i);
     badge.textContent = PHASE_TEXT[s.phase] || s.phase;
     badge.className = "badge " + s.phase;
-    $("smode" + i).textContent = (sv.mode === "manual" ? "手动" : "自动") + (s.en ? "" : " · 已禁用");
+    /* 模式来源要写出来：遥控接管时页面上的"自动/手动"是生效值，不是设置页那一栏 */
+    $("smode" + i).textContent = (sv.mode === "manual" ? "手动" : "自动") +
+      (sv.mode_src === "rc" ? "（遥控）" : "（设置）") + (s.en ? "" : " · 已禁用");
     $("sslip" + i).textContent = s.slip_left ? "左侧更快" : (s.ratio > 0.01 ? "右侧更快" : "");
     $("sreached" + i).textContent = s.reached ? "✓ 已到位" : "";
     $("stgt" + i).textContent = s.target_us + "µs";
@@ -416,6 +471,46 @@ function echoServoCfg(sv, cfg) {
   echoNum($("sholdmax"), cfg.hold_max_ms);
   echoNum($("sprobe"), cfg.probe_ms);
   echoNum($("sspeed"), cfg.sim_speed);
+}
+
+function renderRc(rv) {
+  const cfg = rv.cfg || {};
+  if (!dirty.rc) {
+    echoChk($("rc-sim"), cfg.sim);
+    for (let i = 0; i < RC_CH; i++) {
+      const sl = $("rcm" + i);
+      if (document.activeElement !== sl && cfg.sim_us) {
+        sl.value = cfg.sim_us[i];
+        $("rcm" + i + "v").textContent = cfg.sim_us[i];
+      }
+    }
+    $("rcm0zone").textContent = (Number($("rcm0").value) >= 1500) ? "手动区" : "自动区";
+  }
+
+  const src = $("rc-src");
+  src.textContent = RC_SRC_TEXT[rv.src] || rv.src;
+  src.className = (rv.src === "none") ? "slip" : "note";
+
+  (rv.ch || []).forEach((c, i) => {
+    $("rcu" + i).textContent = c.seen ? c.us + "µs" : "—";
+    const st = $("rcs" + i);
+    if (c.valid) {
+      st.textContent = (i === 0) ? ((c.us >= 1500) ? "手动区" : "自动区") : "有信号";
+      st.className = "note";
+    } else {
+      /* "从未收到"（线没接）和"超时"（掉线了）分开写：调试时指向的动作完全不同 */
+      st.textContent = c.seen ? `无信号（${c.age_ms}ms 前）` : "从未收到";
+      st.className = "slip";
+    }
+  });
+  /* 每根差速轴此刻吃的是透传还是滑杆，接在通道行后面 */
+  (rv.target || []).forEach((t, i) => {
+    const st = $("rcs" + (i + 1));
+    st.textContent += ` → ${t.from_rc ? "透传" : "回落滑杆"} ${t.us}µs`;
+  });
+
+  $("rc-mode").textContent = (rv.mode === "manual" ? "手动" : "自动") +
+    (rv.mode_src === "rc" ? "（来自遥控）" : "（来自设置）");
 }
 
 function connectWS() {
@@ -475,6 +570,15 @@ function applyServoCfg() {
   dirty.servo = false;
 }
 
+function applyRcSim() {
+  send({
+    type: "set_cfg",
+    rc_sim: $("rc-sim").checked,
+    rc_sim_us: [0, 1, 2].map(i => parseInt($("rcm" + i).value, 10)),
+  });
+  dirty.rc = false;
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   buildPanels();
   document.querySelectorAll("nav.tabs button").forEach(b => { b.onclick = () => showTab(b.dataset.tab); });
@@ -486,6 +590,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("cfg-apply").onclick = applyCfg;
   $("sim-apply").onclick = applySim;
   $("servo-apply").onclick = applyServoCfg;
+  $("rc-apply").onclick = applyRcSim;
   $("reset-counts").onclick = () => send({ type: "reset_counts" });
   connectWS();
   setInterval(poll, 2000);
