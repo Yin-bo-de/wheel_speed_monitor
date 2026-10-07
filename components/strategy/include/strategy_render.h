@@ -35,6 +35,10 @@ typedef struct {
 
 typedef struct {
     const char *src;          /* "sim" / "ledc" */
+    /* 生效模式与它的来源：遥控接管时它与 cfg.mode 不同，顶层 mode 字段报生效值，
+     * cfg 段里的 mode 仍报配置值（设置页的自动/手动单选靠它回填，不能跟着遥控变）。 */
+    strategy_mode_t effective_mode;
+    const char *mode_src;     /* "rc" / "cfg" */
     bool sim;                 /* 模拟舵机开关（配置回显） */
     uint32_t sim_speed_us_s;  /* 模拟行程速率 µs/s（配置回显） */
     strategy_config_t cfg;    /* 两档脉宽与策略参数（配置回显） */

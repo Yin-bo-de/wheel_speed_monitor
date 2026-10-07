@@ -23,7 +23,10 @@ esp_err_t servo_render_block(const servo_render_state_t *rs,
         return ESP_ERR_INVALID_ARG;
     }
     const strategy_config_t *cfg = &rs->cfg;
-    const char *mode = (cfg->mode == STRATEGY_MODE_MANUAL) ? "manual" : "auto";
+    /* 顶层报生效模式（可能是遥控接管的），cfg 段报配置模式——设置页的
+     * 自动/手动单选靠后者回填，跟着遥控变会让表单自己跳 */
+    const char *mode = (rs->effective_mode == STRATEGY_MODE_MANUAL) ? "manual" : "auto";
+    const char *cfg_mode = (cfg->mode == STRATEGY_MODE_MANUAL) ? "manual" : "auto";
     size_t off = 0;
 
 #define RENDER_SNPRINTF(...) do { \
@@ -32,8 +35,10 @@ esp_err_t servo_render_block(const servo_render_state_t *rs,
         off += (size_t)n_; \
     } while (0)
 
-    RENDER_SNPRINTF("{\"type\":\"servo\",\"src\":\"%s\",\"mode\":\"%s\",\"sim\":%s,\"servos\":[",
+    RENDER_SNPRINTF("{\"type\":\"servo\",\"src\":\"%s\",\"mode\":\"%s\",\"mode_src\":\"%s\","
+                    "\"sim\":%s,\"servos\":[",
                     (rs->src != NULL) ? rs->src : "sim", mode,
+                    (rs->mode_src != NULL) ? rs->mode_src : "cfg",
                     rs->sim ? "true" : "false");
 
     for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
@@ -58,7 +63,7 @@ esp_err_t servo_render_block(const servo_render_state_t *rs,
                     rs->sim ? "true" : "false",
                     (unsigned long)cfg->unlock_us[0], (unsigned long)cfg->unlock_us[1],
                     (unsigned long)cfg->lock_us[0], (unsigned long)cfg->lock_us[1],
-                    (unsigned long)cfg->manual_us[0], (unsigned long)cfg->manual_us[1], mode,
+                    (unsigned long)cfg->manual_us[0], (unsigned long)cfg->manual_us[1], cfg_mode,
                     (double)cfg->slip_engage_ratio, (double)cfg->slip_min_rpm,
                     (unsigned long)cfg->lock_hold_ms, (unsigned long)cfg->lock_hold_max_ms,
                     (unsigned long)cfg->probe_window_ms, (unsigned long)rs->sim_speed_us_s);

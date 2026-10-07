@@ -301,9 +301,6 @@ static void test_arg_guards(void)
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, strategy_feed_wheel_rpm(NULL, &cfg, 0));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, strategy_feed_wheel_rpm(r, NULL, 0));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, strategy_get_state(NULL));
-
-    uint16_t us = 0;
-    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_SUPPORTED, strategy_rc_read(0, &us));
 }
 
 /* 18. 车轮继续转着清除打滑：退避等级要能复位，下次从初始值重来 */

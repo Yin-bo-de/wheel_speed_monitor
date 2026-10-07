@@ -165,10 +165,3 @@ esp_err_t strategy_get_state(strategy_state_t *out)
     }
     return ESP_OK;
 }
-
-esp_err_t strategy_rc_read(uint8_t channel, uint16_t *us)
-{
-    (void)channel;
-    (void)us;
-    return ESP_ERR_NOT_SUPPORTED; /* 二期：RC 接收机 PWM 捕获（RMT） */
-}

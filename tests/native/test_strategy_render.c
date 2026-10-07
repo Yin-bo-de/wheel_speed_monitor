@@ -26,6 +26,8 @@ static void fresh(void)
     memset(&rs, 0, sizeof(rs));
     strategy_config_default(&rs.cfg);
     rs.src = "sim";
+    rs.effective_mode = STRATEGY_MODE_AUTO;
+    rs.mode_src = "cfg";
     rs.sim = true;
     rs.sim_speed_us_s = 3000;
     for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
@@ -47,6 +49,7 @@ static void test_all_required_fields(void)
     assert_contains(buf, "\"type\":\"servo\"");
     assert_contains(buf, "\"src\":\"sim\"");
     assert_contains(buf, "\"mode\":\"auto\"");
+    assert_contains(buf, "\"mode_src\":\"cfg\"");
     assert_contains(buf, "\"servos\":[");
     assert_contains(buf, "\"cfg\":{");
     assert_contains(buf, "\"i\":0");
@@ -124,12 +127,35 @@ static void test_ledc_and_manual_echo(void)
     rs.src = "ledc";
     rs.sim = false;
     rs.cfg.mode = STRATEGY_MODE_MANUAL;
+    rs.effective_mode = STRATEGY_MODE_MANUAL;
     char buf[1024];
     size_t used = 0;
     servo_render_block(&rs, buf, sizeof(buf), &used);
     assert_contains(buf, "\"src\":\"ledc\"");
     assert_contains(buf, "\"mode\":\"manual\"");
     assert_contains(buf, "\"sim\":false");
+}
+
+/* 5b. 生效模式与配置模式不同（遥控接管）：顶层报生效值，cfg 段仍报配置值。
+ * 设置页的自动/手动单选读的是 cfg 段，跟着遥控变会让表单自己跳。 */
+static void test_effective_mode_differs_from_cfg(void)
+{
+    fresh();
+    rs.effective_mode = STRATEGY_MODE_MANUAL; /* 遥控判定为手动 */
+    rs.mode_src = "rc";
+    rs.cfg.mode = STRATEGY_MODE_AUTO;         /* 设置页配置仍是自动 */
+    char buf[1024];
+    size_t used = 0;
+    servo_render_block(&rs, buf, sizeof(buf), &used);
+    assert_contains(buf, "\"mode\":\"manual\",\"mode_src\":\"rc\"");
+    assert_contains(buf, "\"mode\":\"auto\",\"engage\":");
+
+    rs.effective_mode = STRATEGY_MODE_AUTO;
+    rs.mode_src = "cfg";
+    rs.cfg.mode = STRATEGY_MODE_MANUAL;
+    servo_render_block(&rs, buf, sizeof(buf), &used);
+    assert_contains(buf, "\"mode\":\"auto\",\"mode_src\":\"cfg\"");
+    assert_contains(buf, "\"mode\":\"manual\",\"engage\":");
 }
 
 /* 6. 缓冲不足返回错误码 */
@@ -175,6 +201,7 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_two_detents_echo_per_channel, "test_two_detents_echo_per_channel", __LINE__);
     UnityDefaultTestRun(test_slip_diagnostics, "test_slip_diagnostics", __LINE__);
     UnityDefaultTestRun(test_ledc_and_manual_echo, "test_ledc_and_manual_echo", __LINE__);
+    UnityDefaultTestRun(test_effective_mode_differs_from_cfg, "test_effective_mode_differs_from_cfg", __LINE__);
     UnityDefaultTestRun(test_buffer_too_small, "test_buffer_too_small", __LINE__);
     UnityDefaultTestRun(test_deterministic, "test_deterministic", __LINE__);
     UnityDefaultTestRun(test_block_fits_budget, "test_block_fits_budget", __LINE__);

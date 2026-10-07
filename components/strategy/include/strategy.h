@@ -87,9 +87,6 @@ esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
 
 esp_err_t strategy_get_state(strategy_state_t *out);
 
-/* RC 通道读捕获脉宽（µs）。二期未接 RC 输入，恒返回 ESP_ERR_NOT_SUPPORTED。 */
-esp_err_t strategy_rc_read(uint8_t channel, uint16_t *us);
-
 #ifdef __cplusplus
 }
 #endif
