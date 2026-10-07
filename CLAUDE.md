@@ -47,7 +47,7 @@ ctest --test-dir tests/native/build --output-on-failure
 
 | 任务 | 核心 | 优先级 | 栈 | 说明 |
 |---|---|---|---|---|
-| sampler_task | Core0 | 22 | 3072 | 50ms 周期采样：读 4 路 PCNT + GPIO 电平 → 采集器运算 → 舵机控制链 |
+| sampler_task | Core0 | 22 | 3072 | 50ms 周期采样：读 4 路 PCNT + GPIO 电平 → 采集器运算 → 遥控仲裁 → 舵机控制链 |
 | ws_push_task | Core0 | 15 | 4096 | 100ms 推送遥测帧（单任务 WS 发送） |
 | httpd server | Core1 |  5 | 8192 | 静态页/API/WS 命令解析 |
 
@@ -55,6 +55,8 @@ ctest --test-dir tests/native/build --output-on-failure
 - **舵机控制链（strategy → servo_act/servo_drv）只跑在 sampler_task 里**，
   httpd 只改配置数据、不碰执行器句柄；执行器在模拟与 LEDC 之间的切换也在这里做
   （`servo_act_select`），这样 LEDC 的初始化与寄存器写全落在单任务上下文，不用加锁。
+- **遥控捕获（rc_capture）同理**：GPIO 配置与中断挂载在采样任务里惰性做
+  （`rc_capture_select`），httpd 只改 `rc_sim` / `rc_sim_us` 这两个配置项。
 - 队列/锁都在 main/ 静态共享（bench_http_server 经 ctx 引用）：
   - `s_cfg_mutex`（配置）、`s_frame_mutex`（最新帧）、`s_clients_mutex`（WS 客户端表）
   - 共享结构见 `main/wheel_bench.h`（bench_server_ctx_t）
@@ -63,13 +65,18 @@ ctest --test-dir tests/native/build --output-on-failure
 
 | 用途 | GPIO | 备注 |
 |---|---|---|
-| 4 路霍尔输入 | 1 / 14 / 21 / 47 | 摄像机占 4-18、SD 38-40、PSRAM 35-37、USB 19/20、
-  UART 43/44、WS2812=48、GPIO2 板载 LED、strapping 0/3/45/46 → 仅剩这 4 个空闲 |
+| 4 路霍尔输入 | 1 / 14 / 21 / 47 | 摄像机占 4-18、PSRAM 35-37、USB 19/20、
+  UART 43/44、WS2812=48、GPIO2 板载 LED、strapping 0/3/45/46 → 仅剩这 4 个空闲
+  （SD 的 38-40 后来让给了遥控输入） |
 | 差速舵机输出 | 41 / 42 | 前 / 后差速，LEDC 50Hz。是 S3 的 JTAG 脚（MTDI/MTMS），
   但默认调试通道是芯片内置 USB-Serial-JTAG，走内部 TAP、不占引脚
   （IDF 文档 jtag-debugging/tips-and-quirks），所以直接用；只有烧了
   DIS_USB_JTAG efuse 把 JTAG 引到引脚上才会冲突 |
-| 二期 RC 输入 | 未定 | 二期再定 |
+| 遥控 PWM 输入 | 38 / 39 / 40 | 模式 / 前差速 / 后差速，GPIO 双沿中断测脉宽。
+  原属板载 microSD 卡座，本项目不用 SD，**代价是卡座不再可用**；
+  39/40 兼 JTAG 脚（MTCK/MTDO），与 41/42 同理。没用 3/45/46 三个净空脚：
+  45 上电被采到高会把 flash 电压切到 1.8V 直接起不来，46 与 BOOT 键的
+  组合影响下载模式 |
 
 ## 组件职责图
 
@@ -81,8 +88,12 @@ main（编排/任务/WiFi/httpd）
  ├─ strategy         差速状态机：打滑判定 / 锁定保持 / 试探退避 / 脉宽映射（纯 C）
  │  └─ strategy_render  舵机 JSON 块渲染（纯 C）
  ├─ servo_act        舵机执行器接口 + 模拟模型（纯 C）
- └─ servo_drv        LEDC 硬件输出（IDF 依赖）
-                     └─ 与 servo_act 共用 servo_act_ops_t，按配置二选一
+ ├─ servo_drv        LEDC 硬件输出（IDF 依赖）
+ │                   └─ 与 servo_act 共用 servo_act_ops_t，按配置二选一
+ ├─ rc_input         遥控判定与仲裁：通道有效性 / 模式判定 / 透传回落（纯 C）
+ │  └─ rc_render        遥控 JSON 块渲染（纯 C）
+ └─ rc_capture       GPIO 双沿中断测遥控脉宽（IDF 依赖）
+                     └─ 与验证台模拟注入共用同一个 rc_input 模型，按配置二选一
 ```
 
 新增采集器步骤见 README「扩展」。
