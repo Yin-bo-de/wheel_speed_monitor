@@ -311,6 +311,13 @@ static esp_err_t handle_set_cfg(const char *payload)
     TRY_U32("probe_window_ms", probe_window_ms);
     TRY_U32("servo_sim_speed_us_s", servo_sim_speed_us_s);
 
+    /* ---- v4：遥控输入（验证台注入三路模拟脉宽） ---- */
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "rc_sim")) != NULL && cJSON_IsBool(j)) {
+        next.rc_sim = cJSON_IsTrue(j);
+        changed = true;
+    }
+    TRY_U32_ARRAY("rc_sim_us", rc_sim_us, CFG_RC_CH_COUNT);
+
 #undef TRY_U32
 #undef TRY_F32
 #undef TRY_BOOLS

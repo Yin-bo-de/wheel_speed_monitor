@@ -26,6 +26,7 @@ extern "C" {
 typedef enum {
     TELEM_TYPE_WHEEL_SPEED = 0,
     TELEM_TYPE_SERVO = 1,        /* 差速舵机状态（策略阶段 + 指令 vs 到达） */
+    TELEM_TYPE_RC = 2,           /* 遥控三路通道 + 每轴目标来源 */
     TELEM_TYPE_MOCK_BASE = 100,  /* 宿主机测试用，固件构建不出现 */
     TELEM_TYPE_COUNT,            /* 非哨兵：不在前端渲染，只占位 */
 } telem_type_t;

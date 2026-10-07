@@ -66,6 +66,26 @@ extern "C" {
 #define WHEEL_SERVO_GPIO_FRONT 41 /* 前差速 */
 #define WHEEL_SERVO_GPIO_REAR 42  /* 后差速 */
 
+/* 遥控接收机三路 PWM 输入（GPIO 双沿中断测脉宽，见 components/rc_capture）。
+ *
+ * 38/39/40 原属板载 microSD 卡座：本项目从不用 SD，卡座让位；39/40 兼外部
+ * JTAG 脚（MTCK/MTDO），与已在用的 41/42 同理——默认调试走内置
+ * USB-Serial-JTAG，不占这四根脚。
+ *
+ * 没选另外三个"净空"脚 3/45/46：它们都是 strapping，45 在上电瞬间被采到
+ * 高电平会把 flash 供电切成 1.8V 直接起不来；46 与 BOOT 键的组合会影响
+ * 下载模式；3 只在烧过 efuse 时才影响调试源。让一路持续发脉冲的信号去踩
+ * 上电敏感脚不划算。
+ *
+ * 现状提醒：接真接收机之前，这三个脚上什么都没有（悬空，内部下拉）。 */
+#define WHEEL_RC_GPIO_MODE 38       /* 模式通道：≥1500µs 手动 / <1500µs 自动 */
+#define WHEEL_RC_GPIO_DIFF_FRONT 39 /* 前差速通道 */
+#define WHEEL_RC_GPIO_DIFF_REAR 40  /* 后差速通道 */
+
+/* RC 通道超时：接收机 50Hz 帧周期 20ms，连丢 5 帧即判信号丢失。
+ * 采样节拍 50ms，最迟 3 拍（150ms）内通告回落。 */
+#define WHEEL_RC_TIMEOUT_MS 100
+
 #ifdef __cplusplus
 }
 #endif
