@@ -51,6 +51,7 @@
   .badge.idle { background:#2a2a2a; color:#999; }
   .badge.locked { background:#4a1e1e; color:#ff7f7f; }
   .badge.probe { background:#17364a; color:#7fc8ff; }
+  .badge.manual { background:#332a4a; color:#b39ddb; }
   .servo-val { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:12px; align-items:baseline; }
   .servo-val span { color:var(--dim); font-size:11px; }
   .servo-val b { font-variant-numeric:tabular-nums; }
@@ -232,6 +233,9 @@ const RC_SRC_TEXT = {
 };
 const cols = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373"];
 const PHASE_TEXT = { idle: "已解锁", locked: "锁定中", probe: "试探中" };
+/* 手动模式下判"在不在锁定位/解锁位"的容差：RC 脉宽有 ±几微秒抖动，
+ * 舵机自身也有死区，按逐个微秒相等去判会来回跳 */
+const DETENT_TOL_US = 20;
 let ws = null, reconnect = 0, lastFrame = null, activeTab = "monitor";
 const hist = { t: [], rpm: [[], [], [], []] };
 /* 用户正在编辑的卡片组：回显先跳过，免得 100ms 一帧把输入踩掉 */
@@ -435,12 +439,30 @@ function renderServo(sv) {
     const lo = Math.min(unlock, lock), hi = Math.max(unlock, lock), span = Math.max(1, hi - lo);
     $(`sdet${i}`).textContent = `解锁 ${unlock} / 锁定 ${lock}`;
     const badge = $("sphase" + i);
-    badge.textContent = PHASE_TEXT[s.phase] || s.phase;
-    badge.className = "badge " + s.phase;
+    if (sv.mode === "manual") {
+      /* 手动模式下状态机根本不跑、phase 恒为 idle，拿它显示"锁没锁"是撒谎：
+       * 遥控把脉宽推到锁定档时状态机确实是 idle。改看指令脉宽落在哪一档——
+       * 手动模式本来就是"给多少输出多少"，落在哪一档就是哪个物理位置。 */
+      if (Math.abs(s.target_us - lock) <= DETENT_TOL_US) {
+        badge.textContent = "锁定位";
+        badge.className = "badge locked";
+      } else if (Math.abs(s.target_us - unlock) <= DETENT_TOL_US) {
+        badge.textContent = "解锁位";
+        badge.className = "badge idle";
+      } else {
+        badge.textContent = "手动";
+        badge.className = "badge manual";
+      }
+    } else {
+      badge.textContent = PHASE_TEXT[s.phase] || s.phase;
+      badge.className = "badge " + s.phase;
+    }
     /* 模式来源要写出来：遥控接管时页面上的"自动/手动"是生效值，不是设置页那一栏 */
     $("smode" + i).textContent = (sv.mode === "manual" ? "手动" : "自动") +
       (sv.mode_src === "rc" ? "（遥控）" : "（设置）") + (s.en ? "" : " · 已禁用");
-    $("sslip" + i).textContent = s.slip_left ? "左侧更快" : (s.ratio > 0.01 ? "右侧更快" : "");
+    /* 方向标签只在速差有意义时给。原来只在"右侧更快"那半边判了门槛，左侧
+     * 只要 al>ar 就挂着：EMA 收敛后两轮能差到 1e-7，标签却永远下不来。 */
+    $("sslip" + i).textContent = (s.ratio > 0.01) ? (s.slip_left ? "左侧更快" : "右侧更快") : "";
     $("sreached" + i).textContent = s.reached ? "✓ 已到位" : "";
     $("stgt" + i).textContent = s.target_us + "µs";
     $("scur" + i).textContent = fmt(s.cur_us, 0) + "µs";
