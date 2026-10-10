@@ -176,7 +176,8 @@ python3 scripts/gen_pcb.py                        # 重新生成（未填铺铜�
 
 1. **改常量重跑**（推荐，图纸进 git、每版可复现）：
    ```bash
-   python3 scripts/gen_schematic.py          # 重新生成 .kicad_sch / .kicad_sym / 工程文件
+   python3 scripts/gen_schematic.py          # 原理图：.kicad_sch / .kicad_sym / 工程文件
+   python3 scripts/gen_pcb.py                # PCB：.kicad_pcb（导 gerber 前记得重填铺铜，见上）
    ```
    布局常量、网络、元件表都在脚本顶部一节一节排好。
 2. **直接在 KiCad 里改**：改完记得把改动同步回脚本，否则下次重跑会被覆盖。
@@ -201,6 +202,14 @@ CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli
 - KiCad 官方库里不少器件是 `extends` 派生写法（比如 LM2596T-5 继承 LM2596T-12
   的图形）。`kicad_lib.resolve_symbol()` 会自动把父符号的图形/引脚并进来，直接
   用 `find_symbol` 会拿到没有引脚的空壳。
+- **PCB 封装的原点在 1 号焊盘上，不是器件中心**：直接按「中心」摆位整体会偏
+  半个身位——配好的脚位全错过、外框互相压（实测一次撞出 20 多处）。`gen_pcb.py`
+  的 PLACEMENT 表坐标语义是「焊盘包围盒中心」，由脚本解析封装尺寸自动换算；
+  手工加件、手改坐标时记住这个语义。
+- **同网络的走线允许自然汇合**：走线冲突不一定要绕开，经常可以「把两段的同网
+  成员接在一起」（比如霍尔信号直接汇进它在扩展排针的绕行竖线上）。这块板靠
+  这一手把四条霍尔网和五条遥控/舵机网从「单层必打结」里救了出来；而冲突点
+  不用肉眼找，DRC 报告会给精确到 0.01mm 的坐标。
 
 ## 本版明确没做的事
 
