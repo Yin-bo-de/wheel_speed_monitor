@@ -1,0 +1,12 @@
+# 生成器缓存与本机产物（不进 git）。注意 gitignore 不支持行尾注释，注释只能独占一行
+__pycache__/
+# KiCad 本机界面设置
+*.kicad_prl
+# KiCad 工程锁文件（打开工程就生成）
+*.lck
+# VS Code 本地历史目录
+.history/
+# KiCad 封装信息缓存
+fp-info-cache
+# KiCad 自动备份目录
+*-backups/

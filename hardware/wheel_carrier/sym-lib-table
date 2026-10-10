@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "wheel_carrier")(type "KiCad")(uri "${KIPRJMOD}/wheel_carrier.kicad_sym")(options "")(descr "本工程自定义符号：开发板两排针座"))
+)
