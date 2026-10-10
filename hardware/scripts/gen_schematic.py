@@ -707,7 +707,9 @@ def write_custom_lib_files(out_path):
                  '(descr "本工程自定义符号：开发板两排针座"))\n'
                  ')\n')
     # 最小工程文件：让 KiCad/ERC 有"工程"语境（${KIPRJMOD} 才能解析出符号库路径），
-    # 双击 .kicad_pro 打开即是完整工程；缺失的配置段 KiCad 会按默认值补齐
+    # 双击 .kicad_pro 打开即是完整工程。注意 meta.version 必须写 3（KiCad 10 的
+    # 当前格式）：写 1 会触发"迁移"——KiCad 把文件改写成一整份默认配置，顺手把
+    # 我们对 lib_footprint_mismatch 的降级忽略丢掉（实测），版号写 3 它就原样读
     pro_path = os.path.join(out_dir, "wheel_carrier.kicad_pro")
     with open(pro_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write('{\n'
@@ -717,7 +719,7 @@ def write_custom_lib_files(out_path):
                  '  "cvpcb": {},\n'
                  '  "erc": {},\n'
                  '  "libraries": {},\n'
-                 '  "meta": {"filename": "wheel_carrier.kicad_pro", "version": 1},\n'
+                 '  "meta": {"filename": "wheel_carrier.kicad_pro", "version": 3},\n'
                  '  "net_settings": {},\n'
                  '  "pcbnew": {},\n'
                  '  "schematic": {},\n'

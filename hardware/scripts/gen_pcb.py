@@ -6,7 +6,9 @@
   1. 调 kicad-cli 从原理图导网表——焊盘网络的真源是原理图，绝不手写
   2. 按 PLACEMENT 表把各封装嵌进板文件，焊盘自动挂网（对不上就报错，防漏件）
   3. 画板框、四角 M2.5 安装孔、背面 GND 铺铜
-  4. （下一步）布线 -> kicad-cli DRC + 渲染目检 -> 嘉立创打样文件
+  4. 布线（TRACKS/VIAS 表）+ 丝印标注（build_silk；先过 check_silk 几何自检：
+     逐条文字对焊盘开窗/板边/彼此做包围盒检查，不过直接构建失败）
+  5. kicad-cli DRC + 渲染目检 -> 嘉立创打样文件（导出命令见 README）
 
 机械基准（图纸测量 + 用户尺子实测确认）：
   - 开发板两排针中心距 25.4mm（一英寸）；每排 20 针 2.54 间距
@@ -157,6 +159,30 @@ def load_footprint(lib_id):
     return _fpcache[lib_id]
 
 
+# 位号文字位置的局部坐标覆写（库里的默认位置实测会压到邻件丝印或焊盘开窗，
+# 被 DRC 点名；表里的坐标就是各封装自己的局部系）。值 = (局部 x, 局部 y)。
+REF_MOVES = {
+    "LED1": ("-0.83", "4.3"),    # 挪到灯右侧（原位置压在 R5.2 焊盘开窗上，字会被阻焊裁断）
+    "LED6": ("-3.03", "-3.5"),   # 同上，原位置压 R10.2
+    "C1":   ("6.5", "-5.5"),     # 原位置压在 J14 排针外框线上
+    "C4":   ("5.5", "-5.25"),    # 原位置压在 C3 的丝印圆上（一个位号压出 12 条 DRC 告警）
+    "R10":  ("7.0", "-3.4"),     # 原位置压自己的丝印框（R10 转了 270°，位号没跟着让位）
+    "J15":  ("0", "-3.2"),       # 原位置压自己的外框角
+}
+
+
+def ref_local(ref, lib_at):
+    """位号的局部坐标：库里默认位置 + 上面的覆写规则（embed 和自检共用，
+    保证「自检看到的位号位置」就是「文件里写的位置」）。"""
+    if ref in REF_MOVES:
+        return REF_MOVES[ref]
+    if ref.startswith("LED"):
+        return ("0", "-6.0")
+    if ref in ("J1", "J2", "J13", "J14"):
+        return ("0", "-4.0")
+    return (str(lib_at[1]), str(lib_at[2]))
+
+
 def embed_footprint(lib_id, ref, value, x, y, rot, pad_nets):
     """库里的 .kicad_mod 改写成一个板上的封装实例：
     - 顶层的 (version)/(generator) 去掉，改名成 库:名
@@ -192,15 +218,14 @@ def embed_footprint(lib_id, ref, value, x, y, rot, pad_nets):
             pname = str(c[1])
             if pname == "Reference":
                 c[2] = K.Q(ref)
-                # 位号字号压到 0.7、LED 的位号挪出自带丝印圈
+                # 位号字号统一压到 0.8；有问题的位号按 REF_MOVES 挪位
                 eff = K.get(c, "effects")
                 font = K.get(eff, "font") if eff is not None else None
                 size = K.get(font, "size") if font is not None else None
                 if size is not None:
                     size[1], size[2] = "0.8", "0.8"
-                if ref.startswith("LED"):
-                    at = K.get(c, "at")
-                    at[1], at[2] = "0", "-6.0"
+                at = K.get(c, "at")
+                at[1], at[2] = ref_local(ref, at)
             elif pname == "Value":
                 c[2] = K.Q(value)
                 # 板上丝印不印值、只留位号（也是丝印压焊盘告警的大头）
@@ -472,6 +497,190 @@ def emit_routes(out):
         out.append("\t)")
 
 
+# ---------------------------------------------------------------- 丝印标注
+# 标注内容全部在这里生成（坐标 = 文字中心点，与走线同一套板面坐标）。
+# 写完先过 check_silk() 的几何自检（对焊盘开窗 / 板边 / 彼此做包围盒检查），
+# 再进 KiCad DRC 复核。两处都过了才算数——丝印被阻焊裁掉是不可接受的。
+#
+# 约定：功能名用中文（一眼知道接什么）；引脚级标用 ASCII 小字（IO1 / S / +V / G，
+# 0.8mm 高，字号小但笔画简单，仍然清晰）。GPIO 号不手写——从网表取，
+# 原理图改了分配这里会自检报错，不会印出过期的号。
+
+SILK_TEXTS = []   # (文字, x, y, rot, 字号, 线宽)
+
+def silk(text, x, y, rot=0, size=1.2, th=0.15):
+    SILK_TEXTS.append((text, round(x, 4), round(y, 4), rot, size, th))
+
+
+def io_name(net):
+    """网名 → 板上丝印短名：GPIO1→IO1；IO4 原样；+3V3→3V3；DEV_5V/+5V→5V。"""
+    if net.startswith("GPIO"):
+        return "IO" + net[4:]
+    if net.startswith("IO") and net[2:].isdigit():
+        return net
+    if net in ("+3V3", "+BEC"):
+        return net[1:]
+    if net in ("DEV_5V", "+5V"):
+        return "5V"
+    if net in ("GND", "EN"):
+        return net
+    raise SystemExit(f"丝印短名表不认识网名 {net}")
+
+
+def build_silk(padmap):
+    # 先对网表：信号脚网名是丝印内容的依据，对不上宁可构建失败（改动原理图后
+    # 这里会拦住，提醒同步更新丝印假设）
+    expect = {"J3": "GPIO1", "J4": "GPIO14", "J5": "GPIO21", "J6": "GPIO47",
+              "J7": "GPIO41", "J8": "GPIO42", "J9": "GPIO38", "J10": "GPIO39",
+              "J11": "GPIO40"}
+    for ref, want in expect.items():
+        got = padmap[ref]["1"]
+        if got != want:
+            raise SystemExit(f"{ref} 信号脚网名是 {got}，丝印表假设 {want}——"
+                             "原理图改动后先更新 build_silk 的假设")
+
+    # 霍尔：功能 + GPIO 标在本列指示灯正下方（一整列 = 一路霍尔，
+    # 接口/上拉/限流/指示灯顺读下来）；S/+V/G 标在接口焊盘下沿
+    halls = [("J4", "右前霍尔", 11, 8), ("J3", "左前霍尔", 21, 21),
+             ("J5", "左后霍尔", 34, 34), ("J6", "右后霍尔", 47, 47)]
+    for ref, name, xc, col in halls:
+        silk(f"{name} {io_name(padmap[ref]['1'])}", col, 31.7)
+        for dx, ch in ((-2.54, "S"), (0, "+V"), (2.54, "G")):
+            silk(ch, xc + dx, 8.0, size=0.8)
+
+    # 右侧舵机/遥控：功能 + GPIO 标在排针左前方的空白区（y 对齐到接口中心，
+    # 一眼对上哪行是哪路）；S/+V/G 标在焊盘左侧列
+    right = [("J8", "舵机 后差速", 46), ("J7", "舵机 前差速", 56),
+             ("J11", "遥控 后差速", 66), ("J10", "遥控 前差速", 76),
+             ("J9", "遥控 模式", 86)]
+    for ref, name, yc in right:
+        silk(f"{name} {io_name(padmap[ref]['1'])}", 73, yc)
+        for dy, ch in ((-2.54, "S"), (0, "+V"), (2.54, "G")):
+            silk(ch, 85.2, yc + dy, size=0.8)
+
+    # J15 电源排针：每脚一个竖排词标（正下方，方向与排针垂直）
+    j15 = [io_name(padmap["J15"][str(i)]) for i in range(1, 5)]
+    if j15 != ["BEC", "5V", "3V3", "GND"]:
+        raise SystemExit(f"J15 电源排针的脚序变成 {j15} 了，丝印标注要跟着改")
+    for i, word in enumerate(j15):
+        # 3V3 让开自己那根 +3V3 竖线 1mm，免得文字跟导线叠着（其余三脚线不到这里）
+        dx = 1.0 if word == "3V3" else 0.0
+        silk(word, 66.19 + 2.54 * i + dx, 27.2, rot=90, size=1.0)
+    silk("电源排针", 78.7, 21.3)
+
+    # 开发板插座 + 扩展排针：每针网名（开发板插上去前靠它对针位）。
+    # 20 针 2.54 间距一行排不下 IO43 这种 4 字符，隔针错两行排
+    for ref, y_odd, y_even in (("J1", 38.5, 37.3), ("J2", 64.05, 62.95),
+                               ("J13", 81.5, 79.6), ("J14", 89.7, 87.5)):
+        for i in range(1, 21):
+            silk(io_name(padmap[ref][str(i)]), 12.7 + 2.54 * (i - 1),
+                 y_odd if i % 2 else y_even, size=0.8)
+    # 扩展排针右端标注对应关系（左端被自带外框和 1 脚标占着）
+    silk("J13=J1", 69, 84, size=0.8)
+    silk("J14=J2", 69, 92, size=0.8)
+
+    # 电源区
+    silk("BEC 6~7.4V", 6.3, 108.4, size=1.1)      # J12 端子下方（端子自带丝印框到 y≈104.9）
+    silk("+", 3.5, 106.45, size=1.4, th=0.25)
+    silk("-", 8.5, 106.45, size=1.4, th=0.25)
+    silk("BEC", 68.5, 99.4, size=1.0)             # LED1：+BEC 上电指示
+    silk("5V", 69, 118.4, size=1.0)               # LED6：降压段输出指示
+    silk("+BEC", 30, 94.4, size=1.0)              # 底部大电流母线
+    silk("+3V3", 20, 34.75, size=1.0)             # 霍尔上拉汇流（母线 y33.5 的正下方空档）
+    silk("+5V", 67, 107.2, size=1.0)
+    silk("轮速监测台转接底板 v3", 80, 9.0, size=1.1)
+
+
+PIN1_ROWS = (40.64, 66.04, 84.0, 92.0)   # J1/J2/J13/J14 的 1 脚都在这四个 y 上（x=12.7）
+
+
+def check_silk(padmap):
+    """几何自检：每条文字对全部焊盘开窗、板边、其他文字做包围盒检查。
+    KiCad DRC 也能报同样的错，但在这里拦下改起来快得多。"""
+    def advance(ch, size):
+        if ord(ch) > 0x2E80:            # CJK：全角等宽
+            return 1.15 * size
+        if ch == " ":
+            return 0.6 * size
+        return 1.0 * size
+
+    pads, ref_boxes = [], []
+    for ref, lib_id, _v, x, y, rot in PLACEMENT:
+        node = load_footprint(lib_id)
+        xs, ys, lib_at = [], [], None
+        for c in node:
+            if isinstance(c, list) and c and c[0] == "pad":
+                at = K.get(c, "at")
+                xs.append(float(at[1])); ys.append(float(at[2]))
+            elif (isinstance(c, list) and c and c[0] == "property"
+                  and str(c[1]) == "Reference"):
+                lib_at = K.get(c, "at")
+        ox, oy = rot_off((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2, rot)
+        ox, oy = x - ox, y - oy
+        for c in node:
+            if isinstance(c, list) and c and c[0] == "pad":
+                at, sz = K.get(c, "at"), K.get(c, "size")
+                px, py = rot_off(float(at[1]), float(at[2]), rot)
+                pads.append((f"{ref}.{c[1]}", ox + px, oy + py,
+                             float(sz[1]) / 2 + 0.15, float(sz[2]) / 2 + 0.15))
+        # 位号文字同样纳入检查：位号压焊盘开窗 = 字被阻焊裁掉，是真缺陷
+        lx, ly = ref_local(ref, lib_at)
+        rx, ry = rot_off(float(lx), float(ly), rot)
+        w = sum(advance(ch, 0.8) for ch in ref) + 0.15
+        ref_boxes.append((f"{ref} 位号", ox + rx, oy + ry, w / 2, 1.15 * 0.8 / 2))
+
+    boxes = []
+    for text, x, y, rot, size, th in SILK_TEXTS:
+        w = sum(advance(ch, size) for ch in text) + th
+        h = 1.15 * size + th
+        if rot in (90, 270):
+            w, h = h, w
+        boxes.append((text, x, y, w / 2, h / 2))
+    boxes += ref_boxes
+
+    problems = []
+    for text, x, y, hw, hh in boxes:
+        for name, px, py, phw, phh in pads:
+            if abs(x - px) < hw + phw and abs(y - py) < hh + phh:
+                problems.append(f"丝印「{text}」压住焊盘 {name} 的开窗")
+        if not (0.3 <= x - hw and x + hw <= BOARD_W - 0.3
+                and 0.3 <= y - hh and y + hh <= BOARD_H - 0.3):
+            problems.append(f"丝印「{text}」出板边安全区 "
+                            f"(x {x-hw:.2f}..{x+hw:.2f} y {y-hh:.2f}..{y+hh:.2f})")
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            t1, x1, y1, w1, h1 = boxes[i]
+            t2, x2, y2, w2, h2 = boxes[j]
+            if abs(x1 - x2) < w1 + w2 and abs(y1 - y2) < h1 + h2:
+                problems.append(f"丝印「{t1}」与「{t2}」重叠")
+    if problems:
+        raise SystemExit("丝印自检不过：\n  " + "\n  ".join(problems))
+    print(f"丝印自检通过：{len(boxes)} 条文字，与 {len(pads)} 个焊盘开窗、板边、彼此均无冲突")
+
+
+def emit_silk(out):
+    for i, (text, x, y, rot, size, th) in enumerate(SILK_TEXTS):
+        # 这里的输出是手拼文本行（不走 K.dump 的序列化器），引号要自己带上
+        assert '"' not in text and "\\" not in text, f"丝印内容不能含引号/反斜杠：{text}"
+        out.append(f'\t(gr_text "{text}"')
+        at = f"{x:g} {y:g}" + (f" {rot}" if rot else "")
+        out.append(f"\t\t(at {at})")
+        out.append('\t\t(layer "F.SilkS")')
+        out.append(f'\t\t(uuid "{uid(f"silk-{i}-{text}")}")')
+        out.append("\t\t(effects")
+        out.append(f"\t\t\t(font (size {size:g} {size:g}) (thickness {th:g}))")
+        out.append("\t\t)")
+        out.append("\t)")
+    for i, y in enumerate(PIN1_ROWS):
+        out.append("\t(gr_poly")
+        out.append(f"\t\t(pts (xy 10.3 {y-0.5:g}) (xy 10.3 {y+0.5:g}) (xy 11.1 {y:g}))")
+        out.append("\t\t(stroke (width 0.1) (type default))")
+        out.append("\t\t(fill yes)")
+        out.append('\t\t(layer "F.SilkS")')
+        out.append(f'\t\t(uuid "{uid(f"silk-pin1-{i}")}")')
+        out.append("\t)")
+
+
 # ---------------------------------------------------------------- 板文件组装
 
 def layer_and_setup():
@@ -522,6 +731,7 @@ def emit():
     for i, (mx, my) in enumerate(MOUNTING_HOLES):
         out.append(K.dump(mounting_hole(mx, my, str(i)), 1).replace("\n", "\n\t"))
 
+    emit_silk(out)
     emit_routes(out)
 
     # 板框
@@ -566,6 +776,8 @@ def main():
     for i, (name, _members) in enumerate(nets, start=1):
         NET_CODES[name] = i
     build_routes(padmap)
+    build_silk(padmap)
+    check_silk(padmap)
     text = emit()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
@@ -573,7 +785,7 @@ def main():
     print(f"已生成 {out_path}")
     print(f"元件 {len(PLACEMENT)} 个 / 网络 {len(nets)} 张 / 板框 {BOARD_W:g}×{BOARD_H:g}mm / "
           f"安装孔 {len(MOUNTING_HOLES)} 个(M2.5) / 走线段 {sum(len(p)-1 for *_, p in TRACKS)} 段 / "
-          f"过孔 {len(VIAS)} 个")
+          f"过孔 {len(VIAS)} 个 / 丝印 {len(SILK_TEXTS)} 条 + 1 脚标 {len(PIN1_ROWS)} 个")
 
 
 if __name__ == "__main__":
