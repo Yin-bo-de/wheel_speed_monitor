@@ -1,15 +1,19 @@
 # 转接底板（硬件 v3）
 
-轮速监测台的转接底板原理图。Freenove ESP32-S3 WROOM CAM 开发板插在底板的两个
-20 针排母上，霍尔、舵机、遥控、电源的接线全部从底板的端子上走；开发板全部
-40 针另有 1:1 的扩展排针，将来固件用到新脚不用重新打板。
+轮速监测台的转接底板：原理图 + PCB 布局布线，全部脚本生成。Freenove
+ESP32-S3 WROOM CAM 开发板插在底板的两个 20 针排母上，霍尔、舵机、遥控、电源
+的接线全部从底板的端子上走；开发板全部 40 针另有 1:1 的扩展排针，将来固件
+用到新脚不用重新打板。板子 96 × 122mm，双层，四角 M2.5 安装孔。
 
 ![原理图预览](wheel_carrier/preview.png)
 
+![PCB 顶层](wheel_carrier/pcb_top.png)
+
 - **图纸**：用 KiCad 打开 `wheel_carrier/wheel_carrier.kicad_pro`（双击即可）。
-- **生成器**：`scripts/gen_schematic.py`，图纸内容（元件、连线、坐标）都是脚本
-  里的常量，改完重跑就出新版。
-- **验证状态**：ERC 0 错误 0 警告；网表 50 张网逐网核对与设计一致；渲染图上目检过。
+- **生成器**：`scripts/gen_schematic.py`（原理图）+ `scripts/gen_pcb.py`（PCB），
+  内容全是脚本里的常量，改完重跑就出新版。
+- **验证状态**：原理图 ERC 0/0；PCB DRC 0 错误（余量见下「已知接受项」）；
+  Gerber + 钻孔文件已导出（`wheel_carrier/wheel_carrier-gerber.zip`，可直接传嘉立创）。
 
 ## 这块板做什么
 
@@ -102,6 +106,47 @@ same_local_global_label 警告（本来就是同一张网），统一用标签�
 例外——它不改网络名，只负责让 ERC 认可 +BEC/GND 母线有驱动源（降压芯片的
 VIN/GND 是 power_in 引脚，没旗标 ERC 会点名）。
 
+## PCB 设计要点
+
+**布局**（`gen_pcb.py` 的 PLACEMENT 表，坐标为焊盘包围盒中心）：
+顶部一排是霍尔接口 + 10k 上拉 + 330R/指示灯三行；中部的两个 20 针排母把开发板
+架空；两侧/下方按「走线友好」排序——右侧舵机+遥控接口列的顺序（J8→J7→J11→
+J10→J9）就是按各自 J2 目标针的 x 递增排的，B 层那五条走线因此不打结；扩展
+排针 J13/J14 放在排母正下方，40 根 1:1 竖线呈「线帘」状；电源区在底部。
+
+**布线**（TRACKS 表，直角折线 + 过孔换层）：
+- 正面 F.Cu 走信号 + 电源：+BEC 用 1.0~1.5 宽的主干（舵机堵转电流路径），
+  +3V3/+5V 0.5~0.8，信号 0.3；开发板 40 针到扩展排针的竖线利用了排母行列间的
+  1.27mm 间隙，左排靠一次 B 层借道绕开 J2 行。
+- 背面 B.Cu 是整板 GND 铺铜 + 少量跨板长走线（四条霍尔信号、五条遥控/舵机、
+  DEV_5V 东缘通道）；GND 焊盘靠铺铜的热焊盘自动连通，被走线围死的少数几处
+  改成实心连接。
+- 每个过孔、每段净空都是对着 DRC 报告逐条磨出来的；`gen_pcb.py` 里那些
+  「x=... y=...」的注释坐标不是随意摆的，改动前先跑 DRC。
+
+**DRC 与导出的正确姿势**（顺序敏感）：
+
+```bash
+CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli
+python3 scripts/gen_pcb.py                        # 重新生成（未填铺铜）
+"$CLI" pcb drc --refill-zones --save-board \
+    --output /tmp/pcb_drc.rpt wheel_carrier/wheel_carrier.kicad_pcb   # 重填铺铜+存回
+"$CLI" pcb export gerbers --output wheel_carrier/gerber/ wheel_carrier/wheel_carrier.kicad_pcb
+"$CLI" pcb export drill --output wheel_carrier/gerber/ --format excellon \
+    --excellon-units mm wheel_carrier/wheel_carrier.kicad_pcb
+```
+
+坑：`pcb drc` 不带 `--refill-zones` 时**不填铺铜**，GND 会报几十条假「未连接」；
+带上 `--save-board` 才会把铺铜写回文件（gerber 也才有铜皮）。生成器重跑会清掉
+铺铜，导出前记得再走一遍这个流程。
+
+**已知接受项**（都是丝印/外观级，不影响打样与功能）：
+- `silk_overlap` 二十余条：密集区位号丝印与器件自带丝印框靠近，板厂会按
+  工艺裁丝印，位号本身可读；
+- 一颗纯铜孤岛（GND 铺铜碎块，无焊盘）导致的 `unconnected` 提示，功能无碍；
+- `lib_footprint_mismatch` 已在 `.kicad_pro` 里降级忽略（我们有意改了位号
+  字号和部分焊盘）；U1 的焊盘按板厂 DFM 从 0.775 放到了 1.4。
+
 ## BOM（40 个元件，全部直插，方便手焊）
 
 | 位号 | 元件 | 封装 |
@@ -160,5 +205,5 @@ CLI=/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli
 ## 本版明确没做的事
 
 - 保险丝、霍尔信号滤波电容（当前用不上，避免多焊点）
-- PCB 布局与打样文件（下一步；原理图定稿后再做）
+- 打样下单与回板焊接（下一步；gerber 已就绪）
 - 传感器/接收机侧的线束加工（沿用现有线材即可）

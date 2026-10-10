@@ -10,3 +10,6 @@ __pycache__/
 fp-info-cache
 # KiCad 自动备份目录
 *-backups/
+# Gerber/钻孔产物（可由 gen_pcb.py + kicad-cli 重新导出，不进版本库）
+wheel_carrier/gerber/
+wheel_carrier/*.zip

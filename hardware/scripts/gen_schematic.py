@@ -711,7 +711,8 @@ def write_custom_lib_files(out_path):
     pro_path = os.path.join(out_dir, "wheel_carrier.kicad_pro")
     with open(pro_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write('{\n'
-                 '  "board": {},\n'
+                 '  "board": {"design_settings": {"rule_severities": '
+                 '{"lib_footprint_mismatch": "ignore"}}},\n'
                  '  "boards": [],\n'
                  '  "cvpcb": {},\n'
                  '  "erc": {},\n'
