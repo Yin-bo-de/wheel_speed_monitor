@@ -22,6 +22,7 @@
 用法：python3 gen_pcb.py [输出路径]
 """
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -85,10 +86,18 @@ PLACEMENT = [
     ("J11", "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "遥控·后差速", 88, 66, 0),
     ("J10", "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "遥控·前差速", 88, 76, 0),
     ("J9",  "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "遥控·模式", 88, 86, 0),
-    # == 扩展排针（与 J1/J2 一一对应）+ 电源排针 ==
+    # == v4 新增：电调输入 + 油门直通（两口之间是板上直通走线） ==
+    #    放在左侧空通道：+BEC 左脊（x=1.3）就在旁边，两口取电只有几毫米；
+    #    J16 收电调的 3 针插头（BEC 进板、油门信号进板），J17 用杜邦线接回
+    #    接收机油门通道（J17 的 +V 顺带把电送给接收机）
+    ("J16", "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "电调·BEC输入", 6.5, 56, 0),
+    ("J17", "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "接收机·油门", 6.5, 72, 0),
+    # == 扩展排针（与 J1/J2 一一对应）+ 电源条 ==
     ("J13", "Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Vertical", "扩展·左排(直连 J1)", 36.83, 84, 90),
     ("J14", "Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Vertical", "扩展·右排(直连 J2)", 36.83, 92, 90),
-    ("J15", "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", "电源排针", 70, 24, 90),
+    # 电源条 2×8（v4）：rot 270 ⇒ 8 列 × 2 行，针 1 在右端、奇针=上排（电源）、
+    # 偶针=下排（全 GND）；列（西→东）= 3V3×3、5V×3、BEC×2
+    ("J15", "Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical", "电源排针", 71.89, 25.27, 270),
     # == 电源区：三行摆位，间距按外框实数（D10=10.5、DO-201AD=18.9、DIN0207=12.3） ==
     ("J12", "TerminalBlock:TerminalBlock_MaiXu_MX126-5.0-02P_1x02_P5.00mm", "BEC 输入 6~7.4V", 6, 101, 0),
     ("D1",  "Diode_THT:D_DO-201AD_P15.24mm_Horizontal", "1N5824", 22.5, 99.5, 0),
@@ -167,7 +176,7 @@ REF_MOVES = {
     "C1":   ("6.5", "-5.5"),     # 原位置压在 J14 排针外框线上
     "C4":   ("5.5", "-5.25"),    # 原位置压在 C3 的丝印圆上（一个位号压出 12 条 DRC 告警）
     "R10":  ("7.0", "-3.4"),     # 原位置压自己的丝印框（R10 转了 270°，位号没跟着让位）
-    "J15":  ("0", "-3.2"),       # 原位置压自己的外框角
+    "J15":  ("0", "-4.22"),      # 2×8 的默认位号位置贴着自带外框线，往右让一点
 }
 
 
@@ -319,12 +328,13 @@ def build_routes(padmap):
     #      全程绕开四个安装孔与焊盘（都是对着 DRC 逐段修出来的）
     bec = "+BEC"
     t(bec, "F.Cu", 1.0, [(1.3, 95.9), (1.3, 3.5)])             # 左脊（让开板边 0.5）
-    xs = [1.3, 11, 21, 34, 47, 66.19, 89.8]
+    xs = [1.3, 11, 21, 34, 47, 80.78, 89.8]
     for a, b in zip(xs[:-1], xs[1:]):                          # 顶干线（分段在分接点处分断）
         t(bec, "F.Cu", wM, [(a, 3.5), (b, 3.5)])
     for x in (11, 21, 34, 47):                                 # 顶部四个接口 +V
         t(bec, "F.Cu", w5, [(x, 3.5), (x, 6)])
-    t(bec, "F.Cu", w5, [(66.19, 3.5), (66.19, 24)])            # 下到 J15.1
+    t(bec, "F.Cu", w5, [(80.78, 3.5), (80.78, 24)])            # 下到电源条第 1 列（BEC）
+    t(bec, "F.Cu", w5, [(78.24, 24), (80.78, 24)])             # 顶上把两列 BEC 链起来
     ys = [46, 56, 66, 76, 86]      # 连接器中心针 = +V（中心锚定后针 2 就在放置点）
     t(bec, "F.Cu", wB, [(89.8, 3.5), (89.8, ys[0])])           # 右走廊
     for a, b in zip(ys[:-1], ys[1:]):
@@ -337,13 +347,16 @@ def build_routes(padmap):
         t(bec, "F.Cu", w5, [(x, 95.9), (x, y)])
 
     # ---- +3V3：底部汇流（y32，让开霍尔过孔排）+ 每路一列（列线直穿
-    #      自己的两个上拉焊盘），再下到 J1.1、东行到 J15.3
+    #      自己的两个上拉焊盘），再下到 J1.1；电源条的 3V3 列在最西端，
+    #      借东侧上拉列（x=41.92 在 y=20 处经过）兜到条的西北角进上排
     v3 = "+3V3"
     for x in (2.92, 15.92, 28.92, 41.92):
         t(v3, "F.Cu", w3, [(x, 13), (x, 33.5)])
     t(v3, "F.Cu", w3, [(2.92, 33.5), (41.92, 33.5)])
     t(v3, "F.Cu", w3, [(2.92, 33.5), (2.92, 36), (12.7, 36), (12.7, 40.64)])
-    t(v3, "F.Cu", w3, [(41.92, 33.5), (41.92, 36), (71.27, 36), (71.27, 24)])
+    # y=20 是 330R 那一排，走廊得从它下面（y=32.3，灯圈与走线之间的空档）过
+    t(v3, "F.Cu", w3, [(41.92, 32.3), (61.5, 32.3), (61.5, 24), (63, 24)])
+    t(v3, "F.Cu", w3, [(63, 24), (68.08, 24)])                 # 顶上链三列 3V3
 
     # ---- 霍尔四路：F.Cu 走本地（信号脚→10k→指示灯），过孔下 B.Cu 后
     #      走"东侧三列 + 南部三巷 + 三根上行短腿"回 J2/J14。列/巷/腿的
@@ -454,14 +467,32 @@ def build_routes(padmap):
     t(sw, "B.Cu", wS, [(85.2, 107.6), (85.2, 109.6)])                     # 跳 +5V 汇流
     via(sw, 85.2, 109.6)
     t(sw, "F.Cu", wS, [(85.2, 109.6), (85.2, 113), (75.5, 113), (75.5, 110.75)])
+
+    # ---- v4：电调输入 J16 / 接收机 J17 ----
+    # J16 的 +V 接在底部母线东端（ESC 的 BEC 从这里进板）；J17 的 +V 由右走廊
+    # 延长下来（顺带继续给接收机供电）。两口之间的 S 针是「油门直通」：纯走线，
+    # 板子不通电也照传，主控不在线时油门路径不断。
+    if not (padmap["J16"]["1"] == padmap["J17"]["1"] == "THROTTLE"
+            and padmap["J16"]["2"] == padmap["J17"]["2"] == "+BEC"
+            and padmap["J16"]["3"] == padmap["J17"]["3"] == "GND"):
+        raise SystemExit("J16/J17 网表与「电调 / 油门」的设计对不上，先查原理图")
+    thr = padmap["J16"]["1"]
+    t(bec, "F.Cu", w5, [(1.3, 56), (6.5, 56)])                 # 左脊 → J16.+V
+    t(bec, "F.Cu", w5, [(1.3, 72), (6.5, 72)])                 # 左脊 → J17.+V
+    t(thr, "F.Cu", wS, [(6.5, 53.46), (8.5, 53.46)])           # 油门直通：S—S 绕东侧
+    t(thr, "F.Cu", wS, [(8.5, 53.46), (8.5, 69.46)])
+    t(thr, "F.Cu", wS, [(8.5, 69.46), (6.5, 69.46)])
     t("+5V", "F.Cu", w5, [(57.12, 110.5), (57.12, 108.5), (95.0, 108.5)])
+    t("+5V", "B.Cu", w5, [(95.0, 20), (73.16, 20)])            # B 层跳到电源条上方
+    via("+5V", 73.16, 20)
+    t("+5V", "F.Cu", w5, [(73.16, 20), (73.16, 24)])           # 下来进 5V 列
+    t("+5V", "F.Cu", w5, [(70.62, 24), (75.7, 24)])            # 顶上链三列 5V
     t("+5V", "F.Cu", w5, [(62, 108.5), (62, 105.42)])          # R10.1（旋转 270：1 号脚朝上）
     t("+5V", "F.Cu", w5, [(87, 108.5), (87, 110.75)])          # C4.1
     t("+5V", "F.Cu", w5, [(80.5, 108.5), (80.5, 110.75)])      # L1.2
     t("+5V", "F.Cu", w5, [(83.5, 108.5), (83.5, 102.3), (79.7, 102.3), (79.7, 100.5)])  # U1.FB
     t("+5V", "F.Cu", w5, [(95.0, 108.5), (95.0, 20)])
     via("+5V", 95.0, 20)
-    t("+5V", "B.Cu", w5, [(95.0, 20), (68.73, 20), (68.73, 24)])   # Б 层跳开 +BEC 走廊
     t("Net-(LED1-A)", "F.Cu", wS, [(58.08, 99.5), (58.08, 98.23), (63, 98.23)])
     t("Net-(LED6-A)", "F.Cu", wS, [(62, 115.58), (66, 115.58), (66, 113.73), (69, 113.73)])
     for r_ref, led_ref, xr, xl in (("R6", "LED2", 13.08, 8), ("R7", "LED3", 26.08, 21),
@@ -471,6 +502,10 @@ def build_routes(padmap):
     # R5/LED1 的电源指示链（+BEC 经 R5 到 LED1）——见上方 Net-(LED1-A) 一条
     # LED1 的 GND 脚被周围走线围在一个铺铜孤岛里，补一根到 C1 地脚的短走线
     t("GND", "F.Cu", 0.5, [(63, 100.77), (63, 101.8), (42.5, 101.8), (42.5, 100)])
+    # J1 上方那条带子（x≈25~90、y≈32~38）被霍尔信号线和 J1 焊盘排的净空四面
+    # 围成孤岛，铺铜会自动删掉它（漂浮铜不如不要）——从 J1 第 8/9 针的间隙
+    # 穿一根 0.3 的 GND 线下去接到主铺铜，把整条缝进地里，重新填铜后就会铺满
+    t("GND", "B.Cu", 0.3, [(31.75, 36), (31.75, 44)])
 
 
 def emit_routes(out):
@@ -558,15 +593,22 @@ def build_silk(padmap):
         for dy, ch in ((-2.54, "S"), (0, "+V"), (2.54, "G")):
             silk(ch, 85.2, yc + dy, size=0.8)
 
-    # J15 电源排针：每脚一个竖排词标（正下方，方向与排针垂直）
-    j15 = [io_name(padmap["J15"][str(i)]) for i in range(1, 5)]
-    if j15 != ["BEC", "5V", "3V3", "GND"]:
-        raise SystemExit(f"J15 电源排针的脚序变成 {j15} 了，丝印标注要跟着改")
-    for i, word in enumerate(j15):
-        # 3V3 让开自己那根 +3V3 竖线 1mm，免得文字跟导线叠着（其余三脚线不到这里）
-        dx = 1.0 if word == "3V3" else 0.0
-        silk(word, 66.19 + 2.54 * i + dx, 27.2, rot=90, size=1.0)
-    silk("电源排针", 78.7, 21.3)
+    # 电源条（2×8）：上排是电源、下排全地。每个电源脚把电压标在自己那一列的
+    # 正上方（横排 2.54 间距排不下三个字，竖排），下排在两端各标一个 GND——
+    # 一眼读出「上排电源、下排地、每列一对」
+    j15 = [io_name(padmap["J15"][str(i)]) for i in range(1, 17)]
+    if j15 != ["BEC", "GND", "BEC", "GND", "5V", "GND", "5V", "GND",
+               "5V", "GND", "3V3", "GND", "3V3", "GND", "3V3", "GND"]:
+        raise SystemExit(f"J15 电源条脚序变成 {j15}，丝印与检查要跟着改")
+    # 列（西→东）= 奇针号从 15 递减到 1，电源名取各自列的奇针
+    for i, x in enumerate((63, 65.54, 68.08, 70.62, 73.16, 75.7, 78.24, 80.78)):
+        silk(j15[14 - 2 * i], x, 21.0, rot=90, size=1.0)
+    silk("GND", 59.8, 26.54, size=1.0)
+    silk("GND", 84.5, 26.54, size=1.0)
+
+    # 电调输入 / 接收机油门（v4，都在左侧通道；J16 的标让开 J2 第 1 针的「IO43」）
+    silk("电调 BEC 输入", 5.9, 62.9, size=1.0)
+    silk("接收机 油门", 6.5, 79, size=1.0)
 
     # 开发板插座 + 扩展排针：每针网名（开发板插上去前靠它对针位）。
     # 20 针 2.54 间距一行排不下 IO43 这种 4 字符，隔针错两行排
@@ -588,7 +630,7 @@ def build_silk(padmap):
     silk("+BEC", 30, 94.4, size=1.0)              # 底部大电流母线
     silk("+3V3", 20, 34.75, size=1.0)             # 霍尔上拉汇流（母线 y33.5 的正下方空档）
     silk("+5V", 67, 107.2, size=1.0)
-    silk("轮速监测台转接底板 v3", 80, 9.0, size=1.1)
+    silk("轮速监测台转接底板 v4", 80, 9.0, size=1.1)
 
 
 PIN1_ROWS = (40.64, 66.04, 84.0, 92.0)   # J1/J2/J13/J14 的 1 脚都在这四个 y 上（x=12.7）
@@ -708,8 +750,8 @@ def emit():
     out.append('\t(paper "A3")')
     out.append("\t(title_block")
     out.append('\t\t(title "轮速监测台转接底板")')
-    out.append('\t\t(date "2026-10-10")')
-    out.append('\t\t(rev "v3")')
+    out.append('\t\t(date "2026-10-11")')
+    out.append('\t\t(rev "v4")')
     out.append("\t)")
     out.append(K.dump(layers, 1).replace("\n", "\n\t"))
     out.append(K.dump(setup, 1).replace("\n", "\n\t"))
@@ -768,6 +810,28 @@ NET_CODES = {}
 NETLIST_DATA = (None, None)
 
 
+def patch_project_ignore(out_path):
+    """kicad-cli 的某些操作（导出/DRC）会把 .kicad_pro 重写成完整版，
+    顺手把我们对 lib_footprint_mismatch 的降级忽略丢掉（实测，会被重新
+    报成 warning）。生成器每次跑完都补一刀——README 的流程里 gen_pcb 永远在
+    DRC 之前，这样 DRC 看到的始终是忽略状态。"""
+    pro = os.path.join(os.path.dirname(os.path.abspath(out_path)),
+                       "wheel_carrier.kicad_pro")
+    if not os.path.exists(pro):
+        return
+    with open(pro, encoding="utf-8") as fh:
+        data = json.load(fh)
+    sev = (data.setdefault("board", {})
+           .setdefault("design_settings", {})
+           .setdefault("rule_severities", {}))
+    if sev.get("lib_footprint_mismatch") != "ignore":
+        sev["lib_footprint_mismatch"] = "ignore"
+        with open(pro, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(data, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        print(f"已把 {os.path.basename(pro)} 的 lib_footprint_mismatch 忽略设置补回")
+
+
 def main():
     global NET_CODES, NETLIST_DATA
     out_path = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUT
@@ -782,6 +846,7 @@ def main():
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
+    patch_project_ignore(out_path)
     print(f"已生成 {out_path}")
     print(f"元件 {len(PLACEMENT)} 个 / 网络 {len(nets)} 张 / 板框 {BOARD_W:g}×{BOARD_H:g}mm / "
           f"安装孔 {len(MOUNTING_HOLES)} 个(M2.5) / 走线段 {sum(len(p)-1 for *_, p in TRACKS)} 段 / "

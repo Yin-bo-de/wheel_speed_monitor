@@ -45,8 +45,8 @@ ROOT_UUID = "11111111-2222-4333-8444-555555555555"
 NS = _uuid.UUID(ROOT_UUID)
 
 TITLE = "轮速监测台转接底板"
-DATE = "2026-10-10"
-REV = "v3"
+DATE = "2026-10-11"
+REV = "v4"
 PAPER = "A3"
 
 
@@ -379,12 +379,33 @@ def build():
                 props={"Reference": (0, -29.21, None), "Value": (0, 29.21, None)})
     for num in sorted(j14["pins"], key=int):
         stub_label(j14, num, "left", ROW_R_NETS[num])
-    # 电源排针：以后接 IMU/传感器模块的取电口，省得从别处飞线
-    j15 = place("J15", "Connector_Generic:Conn_01x04", "电源排针", (200.66, 172.72),
-                fp="Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
-                props={"Reference": (2.54, -2.54, "left"), "Value": (2.54, 0, "left")})
-    for num, net in (("1", "+BEC"), ("2", "+5V"), ("3", "+3V3"), ("4", "GND")):
+    # 电源排针：接 IMU/传感器模块的取电口，省得从别处飞线。v4 扩成 2×8：
+    # 2×BEC、3×+5V、3×+3V3，其余 8 针全 GND——一根 2.54 针只插得下一根杜邦线，
+    # 传感器多了原版 4 针不够用；每一路电源旁边都紧挨着一根地线。
+    j15 = place("J15", "Connector_Generic:Conn_02x08_Odd_Even", "电源排针", (200.66, 172.72),
+                fp="Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical",
+                props={"Reference": (2.54, -12.7, "left"), "Value": (2.54, 12.7, "left")})
+    for num, net in (("1", "+BEC"), ("3", "+BEC"), ("5", "+5V"), ("7", "+5V"),
+                     ("9", "+5V"), ("11", "+3V3"), ("13", "+3V3"), ("15", "+3V3")):
         stub_label(j15, num, "left", net)
+    for num in range(2, 17, 2):
+        stub_label(j15, str(num), "right", "GND")
+
+    # ---- 电调输入与油门直通（v4 新增） ----------------------------------------
+    # 电调的 3 针插头从这里进板：BEC 电压上 +BEC 轨（三针插头中间那根必是 +V，
+    # 插反只会信号和地换位，电源接不反）；油门信号经板上直通走线送到 J17，
+    # 再用杜邦线接回接收机的油门通道。直通是纯铜走线——板子不通电也照传，
+    # 主控没上电不会断油门。J17 顺带把 BEC 电压送给接收机（同 J9~J11）。
+    j16 = place("J16", "Connector_Generic:Conn_01x03", "电调·BEC输入", (254, 196.85),
+                fp="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+                props={"Reference": (2.54, -3.81, "left"), "Value": (-13.97, 3.81, "right")})
+    j17 = place("J17", "Connector_Generic:Conn_01x03", "接收机·油门", (287.02, 196.85),
+                fp="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+                props={"Reference": (2.54, -3.81, "left"), "Value": (-13.97, 3.81, "right")})
+    for inst in (j16, j17):
+        stub_label(inst, "1", "left", "THROTTLE")
+        stub_label(inst, "2", "left", "+BEC")
+        stub_label(inst, "3", "left", "GND")
 
     # ---- 右侧 3 针接口列 + 上拉 ---------------------------------------------
     for ref, value, sig, y in CONN_ROWS:
@@ -539,8 +560,9 @@ def build():
 
     # ---- 图面文字说明 ---------------------------------------------------------
     add_text("针号 1 从开发板远离 USB 口的一端数起；装板前对开发板丝印核一遍", 127.0, 88.9)
-    add_text("扩展排针 J13/J14 直连开发板全部 40 针；J15 是电源排针", 170.18, 99.06)
+    add_text("扩展排针 J13/J14 直连开发板全部 40 针；J15 电源排针 BEC×2/5V×3/3V3×3，其余全是地", 170.18, 99.06)
     add_text("35/36/37=PSRAM，19/20=USB，0/3/45/46=启动脚：接外部电路前先看 README", 170.18, 101.6)
+    add_text("J16 接电调（BEC 进板）；油门信号经底板直通到 J17，再回接收机油门通道", 254.0, 210.82)
     add_text("BEC 输入 6~7.4V：板上降到 5V 给开发板；舵机/接收机/霍尔走 BEC 原电压", 105.41, 270.51)
     add_text("接口顺序统一：信号 / BEC / GND，与舵机、接收机插头一致", 320.04, 88.9)
     add_text("霍尔指示灯：亮 = 磁铁触发（信号被拉低）；轮子转动能看到闪烁", 354.33, 83.82)
@@ -644,7 +666,7 @@ def emit_all():
     lib_ids = [
         "Connector:Screw_Terminal_01x02",
         "Connector_Generic:Conn_01x03",
-        "Connector_Generic:Conn_01x04",
+        "Connector_Generic:Conn_02x08_Odd_Even",
         "Connector_Generic:Conn_01x20",
         "Device:C",
         "Device:C_Polarized",

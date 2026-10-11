@@ -14,3 +14,6 @@ esp32s3-cam/
 
 
 .DS_Store
+
+# kicad-cli 会把工程本机设置写进当前目录（含误入的目录漂移情况）
+*.kicad_prl
