@@ -232,8 +232,13 @@ python3 scripts/gen_pcb.py                        # 重新生成（未填铺铜�
    ```bash
    python3 scripts/gen_schematic.py          # 原理图：.kicad_sch / .kicad_sym / 工程文件
    python3 scripts/gen_pcb.py                # PCB：.kicad_pcb（导 gerber 前记得重填铺铜，见上）
+   python3 scripts/reload_kicad.py           # 让 KiCad 里打开着的图纸立刻刷新（见下）
    ```
    布局常量、网络、元件表都在脚本顶部一节一节排好。
+   刷新脚本走 KiCad 的 IPC API（「设置 → 插件」里启用后重启一次 KiCad 生效），
+   等价于菜单 File → Revert：PCB 能直接刷新；原理图侧 KiCad 10 的 API 还没实现，
+   得在 eeschema 里手动按 File → Revert（一步，也不用关软件）。Revert 会丢弃
+   界面上未保存的手工改动，和菜单行为一致。
 2. **直接在 KiCad 里改**：改完记得把改动同步回脚本，否则下次重跑会被覆盖。
 
 自检三件套（改完跑一遍）：
