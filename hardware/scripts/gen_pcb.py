@@ -495,10 +495,6 @@ def build_routes(padmap):
     via("+5V", 95.0, 20)
     t("Net-(LED1-A)", "F.Cu", wS, [(58.08, 99.5), (58.08, 98.23), (63, 98.23)])
     t("Net-(LED6-A)", "F.Cu", wS, [(62, 115.58), (66, 115.58), (66, 113.73), (69, 113.73)])
-    for r_ref, led_ref, xr, xl in (("R6", "LED2", 13.08, 8), ("R7", "LED3", 26.08, 21),
-                                   ("R8", "LED4", 39.08, 34), ("R9", "LED5", 52.08, 47)):
-        net = padmap[r_ref]["2"]
-        t(net, "F.Cu", wS, [(xr, 20), (xr, 23.5), (xl, 23.5), (xl, 25.73)])
     # R5/LED1 的电源指示链（+BEC 经 R5 到 LED1）——见上方 Net-(LED1-A) 一条
     # LED1 的 GND 脚被周围走线围在一个铺铜孤岛里，补一根到 C1 地脚的短走线
     t("GND", "F.Cu", 0.5, [(63, 100.77), (63, 101.8), (42.5, 101.8), (42.5, 100)])
@@ -794,7 +790,10 @@ def emit():
     out.append(f'\t\t(uuid "{uid("zone-gnd")}")')
     out.append("\t\t(hatch edge 0.508)")
     out.append("\t\t(connect_pads (clearance 0.508))")
-    out.append("\t\t(min_thickness 0.254)")
+    # 0.2 而不是 KiCad 默认的 0.254：密集区的窄缝（如 J15 电源条下方 ~1mm 宽的
+    # 通道）默认厚度填不进去，中区铺铜整体与外围断成两片（DRC 报"未连接项目"）。
+    # 0.2 仍 ≥ 设计规则下限（min_track_width 0.2），板厂工艺无压力，铺铜整片连通
+    out.append("\t\t(min_thickness 0.2)")
     out.append("\t\t(filled_areas_thickness no)")
     out.append("\t\t(fill (thermal_gap 0.508) (thermal_bridge_width 0.508))")
     out.append("\t\t(polygon")
