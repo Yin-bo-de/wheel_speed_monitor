@@ -252,6 +252,12 @@ def embed_footprint(lib_id, ref, value, x, y, rot, pad_nets):
                     if isinstance(sub, list) and sub and sub[0] == "size":
                         sub[1] = "1.4"
                         sub[2] = "1.4"
+            if ref == "J15" and str(c[1]) == "1":
+                # 电源条第 1 脚（右上角 BEC 列）的方形 1 脚标改圆盘——2026-10-13
+                # 在 KiCad 里手工改的，同步回脚本；脚序靠丝印的电压标注仍读得出
+                if c[3] != "rect":
+                    raise SystemExit(f"J15 的 1 脚形状变成 {c[3]!r}，改圆盘的前提失效")
+                c[3] = "circle"
             if (ref in ("J8", "J7", "J11", "J10", "J9") and str(c[1]) == "3"):
                 c.append(["zone_connect", "2"])
             if (ref == "U1" and str(c[1]) in ("3", "5")) or (ref == "LED1" and str(c[1]) == "1"):
