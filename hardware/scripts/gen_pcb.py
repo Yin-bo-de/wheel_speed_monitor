@@ -240,13 +240,14 @@ def embed_footprint(lib_id, ref, value, x, y, rot, pad_nets):
                 # 板上丝印不印值、只留位号（也是丝印压焊盘告警的大头）
                 c.append(["hide", "yes"])
         kids.append(c)
-    # 焊盘挂网；U1（官方 TO-220-5）焊盘环比板厂最小环宽还差一点，加粗到 0.9；
+    # 焊盘挂网；U1（官方 TO-220-5）焊盘窄边环宽不够板厂下限，等比放大到 1.4；
     # 右侧接口的 GND 脚四周被走线夹着，花焊盘只剩一根辐条，改实心连接
     wanted = pad_nets.get(ref, {})
     for c in kids:
         if isinstance(c, list) and c and c[0] == "pad":
             if ref == "U1":
-                # 原封装是椭圆孔 0.8 宽，小盘环过不了板厂 DFM——放大到 1.4（环 0.3）
+                # 库盘 1.275×1.8 配 1.1 孔，窄边环宽只剩 0.0875（板厂常规下限 0.13）
+                # ——等比放大到 1.4（环 0.15）；间距、孔径照库不动，插装不受影响
                 for sub in c:
                     if isinstance(sub, list) and sub and sub[0] == "size":
                         sub[1] = "1.4"
@@ -279,8 +280,11 @@ def mounting_hole(x, y, tag):
     kids = ["footprint", K.Q(MOUNTING_FP), ["layer", K.Q("F.Cu")],
             ["uuid", K.Q(uid("mnt-" + tag))], ["at", f"{x:g}", f"{y:g}"]]
     for c in node[2:]:
+        # pad 必须留着：2.7mm 的钻孔就挂在它身上。曾经跳过它，结果钻带里一把
+        # 2.7 的刀都没有（照文件做出来板子没有安装孔），铜还直接从孔位上空过——
+        # 别再把 "pad" 加回这个跳过列表（2026-10-13 踩过，用户眼尖发现的）
         if isinstance(c, list) and c and c[0] in ("version", "generator", "layer",
-                                                 "property", "pad"):
+                                                 "property"):
             continue
         kids.append(copy.deepcopy(c))
     return kids
@@ -324,11 +328,15 @@ def build_routes(padmap):
           [(x, 66.04), (x, 80.01), (x + 1.27, 80.01), (x + 1.27, 86.36),
            (x, 86.36), (x, 92)])
 
-    # ---- +BEC：左脊上到顶、顶干线横穿、右走廊下、底部大电流母线，
-    #      全程绕开四个安装孔与焊盘（都是对着 DRC 逐段修出来的）
+    # ---- +BEC：左脊上到顶、顶干线横穿、右走廊下、底部大电流母线；
+    #      左上第一跨绕开安装孔（3.5,3.5）——以前孔没进板文件，DRC 看不到它，
+    #      主干线是直接压着孔位过去的
     bec = "+BEC"
-    t(bec, "F.Cu", 1.0, [(1.3, 95.9), (1.3, 3.5)])             # 左脊（让开板边 0.5）
-    xs = [1.3, 11, 21, 34, 47, 80.78, 89.8]
+    t(bec, "F.Cu", 1.0, [(1.3, 95.9), (1.3, 6.35)])            # 左脊（让开板边 0.5，顶到孔下）
+    # 绕孔：线心离孔心要 ≥ 1.35（孔半径）+ 0.25（孔间隙规则）+ 0.75（半线宽）= 2.35，
+    # y=6.35 一跨实留 2.85（铜边距孔边 0.75），x=6.35 抬回 y=3.5 再并入原干线
+    t(bec, "F.Cu", wM, [(1.3, 6.35), (6.35, 6.35), (6.35, 3.5)])
+    xs = [6.35, 11, 21, 34, 47, 80.78, 89.8]
     for a, b in zip(xs[:-1], xs[1:]):                          # 顶干线（分段在分接点处分断）
         t(bec, "F.Cu", wM, [(a, 3.5), (b, 3.5)])
     for x in (11, 21, 34, 47):                                 # 顶部四个接口 +V
@@ -666,6 +674,10 @@ def check_silk(padmap):
         rx, ry = rot_off(float(lx), float(ly), rot)
         w = sum(advance(ch, 0.8) for ch in ref) + 0.15
         ref_boxes.append((f"{ref} 位号", ox + rx, oy + ry, w / 2, 1.15 * 0.8 / 2))
+
+    # 四个安装孔现在有真实钻孔和阻焊开窗了，一并纳入检查
+    for mx, my in MOUNTING_HOLES:
+        pads.append((f"安装孔({mx:g},{my:g})", mx, my, 1.35 + 0.15, 1.35 + 0.15))
 
     boxes = []
     for text, x, y, rot, size, th in SILK_TEXTS:
