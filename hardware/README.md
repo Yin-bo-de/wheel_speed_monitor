@@ -245,7 +245,12 @@ python3 scripts/gen_pcb.py                        # 重新生成（未填铺铜�
    等价于菜单 File → Revert：PCB 能直接刷新；原理图侧 KiCad 10 的 API 还没实现，
    得在 eeschema 里手动按 File → Revert（一步，也不用关软件）。Revert 会丢弃
    界面上未保存的手工改动，和菜单行为一致。
-2. **直接在 KiCad 里改**：改完记得把改动同步回脚本，否则下次重跑会被覆盖。
+2. **直接在 KiCad 里改**：改完必须同步回脚本，否则下次重跑会被覆盖。同步走
+   `kicad-sync` 技能（对话里输 `/kicad-sync`；工具在
+   `~/.claude/skills/kicad-sync/scripts/`，是仓外的东西，换机器要带走）：
+   `board_diff.py --vs-generated` 语义对比找出改动（KiCad 每次保存都会重排
+   格式，逐字节 diff 读不了）→ 改动翻译进脚本 → `rebuild.py` 重跑生成器、
+   闭环核对（差异必须归零）、重出全部产物。
 
 自检三件套（改完跑一遍）：
 
