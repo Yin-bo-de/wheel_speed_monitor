@@ -4952,7 +4952,7 @@
       (at 133.35 201.93 0)
       (effects (font (size 1.27 1.27)) (justify left))
     )
-    (property "Value" "1000µF/16V"
+    (property "Value" "1000µF/25V"
       (at 133.35 204.47 0)
       (effects (font (size 1.27 1.27)) (justify left))
     )
@@ -5216,7 +5216,7 @@
       (at 154.94 237.49 90)
       (effects (font (size 1.27 1.27)))
     )
-    (property "Value" "1N5822"
+    (property "Value" "SB560"
       (at 146.05 240.03 90)
       (effects (font (size 1.27 1.27)))
     )
@@ -6827,7 +6827,7 @@
       (at 127 203.2 0)
       (effects (font (size 1.27 1.27)) (justify left))
     )
-    (property "Value" "1k"
+    (property "Value" "1.5k"
       (at 127 205.74 0)
       (effects (font (size 1.27 1.27)) (justify left))
     )

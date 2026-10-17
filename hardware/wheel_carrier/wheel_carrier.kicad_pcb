@@ -10207,7 +10207,7 @@
 				)
 			)
 		)
-		(property "Value" "1k"
+		(property "Value" "1.5k"
 			(at 5.08 2.37 0)
 			(layer "F.Fab")
 			(hide yes)
@@ -11715,7 +11715,7 @@
 				)
 			)
 		)
-		(property "Value" "1000µF/16V"
+		(property "Value" "1000µF/25V"
 			(at 2.5 6.25 0)
 			(layer "F.Fab")
 			(hide yes)
@@ -13798,7 +13798,7 @@
 				)
 			)
 		)
-		(property "Value" "1N5822"
+		(property "Value" "SB560"
 			(at 7.62 3.72 0)
 			(layer "F.Fab")
 			(hide yes)

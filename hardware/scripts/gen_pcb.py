@@ -104,10 +104,10 @@ PLACEMENT = [
     # == 电源区：三行摆位，间距按外框实数（D10=10.5、DO-201AD=18.9、DIN0207=12.3） ==
     ("J12", "TerminalBlock:TerminalBlock_MaiXu_MX126-5.0-02P_1x02_P5.00mm", "BEC 输入 6~7.4V", 6, 81.5, 0),
     ("D1",  "Diode_THT:D_DO-201AD_P15.24mm_Horizontal", "1N5824", 22.5, 80, 0),
-    ("C1",  "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm", "1000µF/16V", 40, 80.5, 0),
-    ("R5",  "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal", "1k", 53, 80, 0),
+    ("C1",  "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm", "1000µF/25V", 40, 80.5, 0),
+    ("R5",  "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal", "1.5k", 53, 80, 0),
     ("LED1", "LED_THT:LED_D5.0mm", "绿灯", 63, 80, 90),
-    ("D3",  "Diode_THT:D_DO-201AD_P15.24mm_Horizontal", "1N5822", 22.5, 91, 0),
+    ("D3",  "Diode_THT:D_DO-201AD_P15.24mm_Horizontal", "SB560", 22.5, 91, 0),
     ("C2",  "Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P5.00mm", "100nF", 36, 91, 0),
     ("D2",  "Diode_THT:D_DO-201AD_P15.24mm_Horizontal", "1N5822", 49.5, 91, 0),
     ("R10", "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal", "1k", 52, 86, 0),

@@ -476,7 +476,7 @@ def build():
     add_wire(114.3, 228.6, 121.92, 228.6, "bec-feed-vin")
 
     # 大电容 C1
-    c1 = place("C1", "Device:C_Polarized", "1000µF/16V", (130.81, 203.2), fp=CP_FP,
+    c1 = place("C1", "Device:C_Polarized", "1000µF/25V", (130.81, 203.2), fp=CP_FP,
                props={"Reference": (2.54, -1.27, "left"), "Value": (2.54, 1.27, "left")})
     add_junction(130.81, rail_y, "tap-C1")
     add_wire(130.81, rail_y, *pin_pos(c1, "1"), "rail-C1")
@@ -484,7 +484,7 @@ def build():
     add_label("GND", 130.81, 209.55, "left")
 
     # 电源指示灯：+BEC -> R5 -> LED1 -> GND
-    r5 = place("R5", "Device:R", "1k", (124.46, 204.47), fp=R_FP,
+    r5 = place("R5", "Device:R", "1.5k", (124.46, 204.47), fp=R_FP,
                props={"Reference": (2.54, -1.27, "left"), "Value": (2.54, 1.27, "left")})
     add_junction(124.46, rail_y, "tap-led")
     add_wire(124.46, rail_y, *pin_pos(r5, "1"), "rail-R5")
@@ -515,7 +515,7 @@ def build():
     add_wire(147.32, 236.22, 154.94, 236.22, "sw-a")
     add_wire(154.94, 236.22, 161.29, 236.22, "sw-b")
     add_junction(154.94, 236.22, "d3-tap")
-    d3 = place("D3", "Device:D_Schottky", "1N5822", (154.94, 240.03), rot=270, fp=D_FP,
+    d3 = place("D3", "Device:D_Schottky", "SB560", (154.94, 240.03), rot=270, fp=D_FP,
                # 续流二极管：开关管关断时给电感电流兜出路，K 朝开关节点
                props={"Reference": (0, -2.54, None), "Value": (-8.89, 0, None)})
     add_label("GND", 154.94, 243.84, "right")
