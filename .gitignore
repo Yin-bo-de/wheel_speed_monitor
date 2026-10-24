@@ -8,3 +8,12 @@ __pycache__/
 *.pyc
 .cache/
 
+# 本地方案/计划文档，只在自己机器上留着，不入库
+docs/
+esp32s3-cam/   
+
+
+.DS_Store
+
+# kicad-cli 会把工程本机设置写进当前目录（含误入的目录漂移情况）
+*.kicad_prl

@@ -12,6 +12,9 @@
   header h1 { font-size:18px; margin:0; }
   #status-dot { width:10px; height:10px; border-radius:50%; }
   .ok { background:#4caf50; } .warn { background:#ff9800; }
+  nav.tabs { display:flex; gap:4px; padding:8px 16px 0; max-width:1100px; margin:0 auto; }
+  nav.tabs button { border-radius:6px 6px 0 0; border-bottom-color:transparent; font-size:13px; padding:7px 18px; }
+  nav.tabs button.active { background:var(--panel); border-color:var(--border); border-bottom-color:var(--panel); color:#fff; font-weight:600; }
   main { max-width:1100px; margin:0 auto; padding:12px; }
   h2 { font-size:15px; margin:16px 0 8px; color:var(--dim); }
   .grid { display:grid; gap:10px; }
@@ -32,6 +35,7 @@
   .cfg-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
   .cfg-grid label { font-size:11px; color:var(--dim); display:block; margin-bottom:2px; }
   .cfg-grid input { width:100%; background:#222; color:var(--text); border:1px solid var(--border); border-radius:4px; padding:4px 6px; }
+  .cfg-grid input[type=range] { padding:0; }
   button { background:#2d2d2d; color:var(--text); border:1px solid var(--border); border-radius:4px; padding:6px 12px; cursor:pointer; font-size:12px; }
   button:hover { background:#3a3a3a; }
   .en { display:flex; gap:8px; margin:4px 0; align-items:center; font-size:12px; }
@@ -39,6 +43,24 @@
   label { font-size:12px; }
   .disabled { opacity:0.45; pointer-events:none; }
   .note { font-size:11px; color:var(--dim); }
+  .servo-row { padding:8px 0; border-bottom:1px solid var(--border); }
+  .servo-row:last-child { border-bottom:0; padding-bottom:0; }
+  .servo-head { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .servo-head b { font-size:13px; }
+  .badge { padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600; }
+  .badge.idle { background:#2a2a2a; color:#999; }
+  .badge.locked { background:#4a1e1e; color:#ff7f7f; }
+  .badge.probe { background:#17364a; color:#7fc8ff; }
+  .badge.manual { background:#332a4a; color:#b39ddb; }
+  .servo-val { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:12px; align-items:baseline; }
+  .servo-val span { color:var(--dim); font-size:11px; }
+  .servo-val b { font-variant-numeric:tabular-nums; }
+  .slip { font-size:11px; color:#ffb74d; }
+  .reached { font-size:11px; color:#7fdc7f; }
+  .bar { position:relative; height:6px; background:#222; border-radius:3px; margin-top:6px; }
+  .bar i { position:absolute; top:0; left:0; height:100%; background:#4fc3f7; border-radius:3px; }
+  .bar u { position:absolute; top:-2px; width:2px; height:10px; background:#ffb74d; }
+  .hint { font-size:11px; color:var(--dim); margin:6px 0 0; }
 </style>
 </head>
 <body>
@@ -48,36 +70,51 @@
   <span id="status-text" class="note">连接中…</span>
   <span style="margin-left:auto" id="conn-info" class="note"></span>
 </header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="monitor">监测</button>
+  <button class="tab" data-tab="settings">设置</button>
+</nav>
+
 <main>
+<section id="view-monitor">
   <h2>四轮仪表</h2>
   <div class="grid grid-4" id="wheels"></div>
 
   <h2>轮速曲线（最近 30s，RPM）</h2>
   <canvas id="chart"></canvas>
 
-  <div class="grid grid-2" style="margin-top:12px">
-    <div class="card">
-      <h2>原始 IO 电平监视 <span class="note">(验证接线/供电)</span></h2>
-      <div class="io" id="io"></div>
-      <div class="row" style="margin-top:8px"><span>信号源</span><b id="src">—</b></div>
-      <div class="row"><span>剩余内存</span><b id="heap">—</b></div>
-      <div class="row"><span>运行时长</span><b id="uptime">—</b></div>
-    </div>
-    <div class="card">
-      <h2>模拟模式 <span class="note">(注入合成数据验证显示/计算链路)</span></h2>
-      <label><input type="checkbox" id="sim-toggle"> 启用模拟源</label>
-      <div class="cfg-grid" id="sim-inputs"></div>
-      <div style="margin-top:8px"><button id="sim-apply">应用模拟转速</button></div>
-      <p class="note">模拟与真实霍尔共用同一条计算链：每窗口按目标 RPM 合成脉冲，验证显示与策略输入是否一致。</p>
-    </div>
+  <div class="card" style="margin-top:12px">
+    <h2>原始 IO 电平监视 <span class="note">(验证接线/供电)</span></h2>
+    <div class="io" id="io"></div>
+    <div class="row" style="margin-top:8px"><span>信号源</span><b id="src">—</b></div>
+    <div class="row"><span>剩余内存</span><b id="heap">—</b></div>
+    <div class="row"><span>运行时长</span><b id="uptime">—</b></div>
   </div>
 
   <div class="card" style="margin-top:12px">
+    <h2>差速舵机 <span class="note">(指令 → 到达)</span> <span class="note" id="ssrc">—</span></h2>
+    <div id="servos"></div>
+    <p class="hint">锁定期间刻意不看轮速差——锁上之后两轮被强制同步，速差会被动作本身抹平。所以保持期走完先松开试探；
+      试探窗口数的是「车轮动/停状态保持不变」的时长，中途状态翻转就重新计时。</p>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>遥控输入 <span class="note" id="rc-src">—</span></h2>
+    <div id="rc-chans"></div>
+    <div class="row" style="margin-top:8px"><span>生效模式</span><b id="rc-mode">—</b></div>
+    <p class="hint">模式通道 ≥1500µs 判手动：前后差速原样透传遥控脉宽；&lt;1500µs 判自动：忽略遥控，按轮速算法。
+      任一路超时（100ms 没收到脉冲）即判丢信号，那一处单独回落设置页配置，不影响其余通道。</p>
+  </div>
+</section>
+
+<section id="view-settings" hidden>
+  <div class="card" data-echo-group="cfg">
     <h2>采集配置 <span class="note">(NVS 持久化)</span></h2>
     <div class="en" id="en-toggle"></div>
     <div class="cfg-grid">
       <div><label>磁铁数/转</label><input id="magnets" type="number" min="1" max="16" value="1"></div>
-      <div><label>轮径(mm)</label><input id="diam" type="number" min="10" max="300" value="100"></div>
+      <div><label>轮径(mm)</label><input id="diam" type="number" min="10" max="300" value="105"></div>
       <div><label>EMA 系数</label><input id="alpha" type="number" min="0.05" max="1" step="0.05" value="0.3"></div>
       <div><label>去抖(ms)</label><input id="debounce" type="number" min="0" max="1000" value="0"></div>
     </div>
@@ -87,18 +124,122 @@
     </div>
   </div>
 
-  <div class="card disabled" style="margin-top:12px">
-    <h2>差速舵机 <span class="note">(二期预留)</span></h2>
-    <p class="note">二期：遥控接收机 PWM 输入（手动模式）→ 前后差速控制器 → 舵机 PWM 输出。齿轮/差速逻辑与 RC 通道绑定暂未实现。</p>
+  <div class="card" style="margin-top:12px" data-echo-group="sim">
+    <h2>模拟模式 <span class="note">(注入合成数据验证显示/计算链路)</span></h2>
+    <label><input type="checkbox" id="sim-toggle"> 启用模拟源</label>
+    <div class="cfg-grid" id="sim-inputs"></div>
+    <div style="margin-top:8px"><button id="sim-apply">应用模拟转速</button></div>
+    <p class="hint">模拟与真实霍尔共用同一条计算链：每窗口按目标 RPM 合成脉冲，验证显示与策略输入是否一致。</p>
   </div>
+
+  <div class="card" style="margin-top:12px" data-echo-group="servo">
+    <h2>差速舵机配置 <span class="note">(NVS 持久化)</span></h2>
+
+    <label style="display:block;margin-bottom:8px">
+      <input type="checkbox" id="servo-sim"> 模拟舵机模型
+      <span class="note">（取消勾选 = 由 LEDC 驱动 GPIO41/42 上的真实舵机）</span>
+    </label>
+
+    <div class="en">
+      <span class="note">模式</span>
+      <label><input type="radio" name="servo-mode" value="auto"> 自动（打滑锁差速）</label>
+      <label><input type="radio" name="servo-mode" value="manual"> 手动（直设脉宽）</label>
+    </div>
+
+    <h2 style="margin-top:14px">脉宽映射 <span class="note">(两档式，标准角度舵机 50Hz)</span></h2>
+    <div class="grid grid-2" style="margin-top:8px">
+      <div>
+        <div class="en"><b style="font-size:12px">前差速</b>
+          <label><input type="checkbox" id="sen0"> 使能</label>
+        </div>
+        <div class="cfg-grid">
+          <div><label>解锁(µs)</label><input id="unlock0" type="number" min="500" max="2500" value="1500"></div>
+          <div><label>锁定(µs)</label><input id="lock0" type="number" min="500" max="2500" value="2000"></div>
+          <div><label>手动目标(µs) <b id="man0v">1500</b></label>
+            <input id="man0" type="range" min="500" max="2500" step="10" value="1500"></div>
+        </div>
+      </div>
+      <div>
+        <div class="en"><b style="font-size:12px">后差速</b>
+          <label><input type="checkbox" id="sen1"> 使能</label>
+        </div>
+        <div class="cfg-grid">
+          <div><label>解锁(µs)</label><input id="unlock1" type="number" min="500" max="2500" value="1500"></div>
+          <div><label>锁定(µs)</label><input id="lock1" type="number" min="500" max="2500" value="2000"></div>
+          <div><label>手动目标(µs) <b id="man1v">1500</b></label>
+            <input id="man1" type="range" min="500" max="2500" step="10" value="1500"></div>
+        </div>
+      </div>
+    </div>
+    <p class="hint">自动模式下每个通道只有两个落点：解锁 = 正常行驶位置，锁定 = 差速锁死位置。前后轴各配一组，
+      两轴舵机的安装朝向不同时各填各的行程端即可，不需要「反向」开关。手动模式不理这两档，直接输出手动目标。</p>
+
+    <h2 style="margin-top:14px">打滑判定</h2>
+    <div class="cfg-grid">
+      <div><label>进入门槛(0.05~1.0)</label><input id="sengage" type="number" min="0.05" max="1" step="0.05" value="0.3"></div>
+      <div><label>最低判定(转/分)</label><input id="sminrpm" type="number" min="0" max="2000" value="10"></div>
+    </div>
+
+    <h2 style="margin-top:14px">锁定策略 <span class="note">(保持 → 试探 → 失败退避)</span></h2>
+    <div class="cfg-grid">
+      <div><label>初始保持(ms)</label><input id="shold" type="number" min="200" max="60000" value="3000"></div>
+      <div><label>保持上限(ms)</label><input id="sholdmax" type="number" min="200" max="60000" value="30000"></div>
+      <div><label>试探窗口(ms)</label><input id="sprobe" type="number" min="200" max="10000" value="2000"></div>
+      <div><label>模拟速率(µs/s)</label><input id="sspeed" type="number" min="100" max="20000" value="3000"></div>
+    </div>
+    <p class="hint">试探窗口要盖住舵机行程 + 轮速刷新延迟（低速时可达 1.3 秒）。调小了会在没真脱困时提前判成功。</p>
+
+    <div style="margin-top:10px"><button id="servo-apply">应用舵机配置</button></div>
+  </div>
+
+  <div class="card" style="margin-top:12px" data-echo-group="rc">
+    <h2>遥控模拟 <span class="note">(验证台注入三路 RC 脉宽)</span></h2>
+    <label style="display:block;margin-bottom:8px">
+      <input type="checkbox" id="rc-sim"> 启用模拟遥控信号
+      <span class="note">（关掉 = 没有接收机：三路按超时失效，模式与目标回落设置页配置）</span>
+    </label>
+    <div class="cfg-grid">
+      <div><label>模式通道(µs) <b id="rcm0v">1000</b> <span class="note" id="rcm0zone">自动区</span></label>
+        <input id="rcm0" type="range" min="500" max="2500" step="10" value="1000"></div>
+      <div><label>前差速通道(µs) <b id="rcm1v">1500</b></label>
+        <input id="rcm1" type="range" min="500" max="2500" step="10" value="1500"></div>
+      <div><label>后差速通道(µs) <b id="rcm2v">1500</b></label>
+        <input id="rcm2" type="range" min="500" max="2500" step="10" value="1500"></div>
+    </div>
+    <div style="margin-top:8px"><button id="rc-apply">应用遥控模拟</button></div>
+    <p class="hint">滑杆步进 10，能精确停在 1490 与 1500，手动/自动的分界在页面上直接就能验。
+      接真接收机时这个开关要保持关闭——打开会把 GPIO38/39/40 上的真实信号盖掉。</p>
+  </div>
+
+  <div class="card disabled" style="margin-top:12px">
+    <h2>预留：画面回传展示信息选择 <span class="note">(二期)</span></h2>
+    <p class="hint">二期摄像头启用后，在这里选回传画面上叠加哪些信息（轮速/姿态/舵机状态等）。</p>
+  </div>
+</section>
 </main>
+
 <script>
 "use strict";
-const WHEEL = 4, WS_URL = "ws://" + location.host + "/ws", API = "/api/status", CT = 1000;
+const WHEEL = 4, SERVO = 2, RC_CH = 3, WS_URL = "ws://" + location.host + "/ws", API = "/api/status";
 const wheelNames = ["左前", "右前", "左后", "右后"];
+const servoNames = ["前差速", "后差速"];
+const rcNames = ["模式通道", "前差速通道", "后差速通道"];
+/* 报的是"实际在跑的捕获源"：配置要真捕获但初始化失败时会显示成最后一条，
+ * 那是必须让人看见的不一致，标红而不是悄悄显示成模拟 */
+const RC_SRC_TEXT = {
+  gpio: "实际捕获：GPIO38/39/40 边沿中断",
+  sim: "实际来源：模拟注入",
+  none: "捕获未起来（三路按无信号）",
+};
 const cols = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373"];
-let ws = null, reconnect = 0, lastFrame = null;
+const PHASE_TEXT = { idle: "已解锁", locked: "锁定中", probe: "试探中" };
+/* 手动模式下判"在不在锁定位/解锁位"的容差：RC 脉宽有 ±几微秒抖动，
+ * 舵机自身也有死区，按逐个微秒相等去判会来回跳 */
+const DETENT_TOL_US = 20;
+let ws = null, reconnect = 0, lastFrame = null, activeTab = "monitor";
 const hist = { t: [], rpm: [[], [], [], []] };
+/* 用户正在编辑的卡片组：回显先跳过，免得 100ms 一帧把输入踩掉 */
+const dirty = { cfg: false, sim: false, servo: false, rc: false };
 
 function $(id) { return document.getElementById(id); }
 function fmt(x, d) { return (x === null || x === undefined || isNaN(x)) ? "—" : Number(x).toFixed(d); }
@@ -116,29 +257,85 @@ function buildPanels() {
       <div class="row"><span>累计脉冲</span><b id="pulses${i}">0</b></div>`;
     wheels.appendChild(div);
   }
+
   const io = $("io");
   for (let i = 0; i < WHEEL; i++) {
     const c = document.createElement("div");
     c.className = "cell"; c.textContent = "G" + i;
     io.appendChild(c);
   }
+
   const en = $("en-toggle");
   for (let i = 0; i < WHEEL; i++) {
     const lab = document.createElement("label");
     lab.innerHTML = `<input type="checkbox" id="en${i}" checked> ${wheelNames[i]}`;
     en.appendChild(lab);
   }
+
   const sims = $("sim-inputs");
   for (let i = 0; i < WHEEL; i++) {
     const d = document.createElement("div");
     d.innerHTML = `<label>${wheelNames[i]}</label><input id="sim${i}" type="number" min="0" max="36000" step="1" value="0">`;
     sims.appendChild(d);
   }
+
+  const box = $("servos");
+  for (let i = 0; i < SERVO; i++) {
+    const d = document.createElement("div");
+    d.className = "servo-row";
+    d.innerHTML = `
+      <div class="servo-head">
+        <b>${servoNames[i]}</b>
+        <span class="badge idle" id="sphase${i}">—</span>
+        <span class="note" id="smode${i}"></span>
+        <span class="slip" id="sslip${i}"></span>
+        <span class="reached" id="sreached${i}"></span>
+      </div>
+      <div class="servo-val">
+        <span>指令</span><b id="stgt${i}">—</b>
+        <span>到达</span><b id="scur${i}">—</b>
+        <span>落点</span><b id="sdet${i}">—</b>
+        <span>保持</span><b id="shold${i}">—</b>
+        <span>速差</span><b id="sratio${i}">—</b>
+      </div>
+      <div class="bar"><i id="sbar${i}" style="width:0"></i><u id="stick${i}" style="left:0"></u></div>`;
+    box.appendChild(d);
+  }
+
+  for (let i = 0; i < SERVO; i++) {
+    const sl = $("man" + i), out = $("man" + i + "v");
+    sl.addEventListener("input", () => { out.textContent = sl.value; });
+  }
+
+  const rc = $("rc-chans");
+  for (let i = 0; i < RC_CH; i++) {
+    const d = document.createElement("div");
+    d.className = "row";
+    d.innerHTML = `<span>${rcNames[i]}</span><b id="rcu${i}">—</b><span class="note" id="rcs${i}"></span>`;
+    rc.appendChild(d);
+  }
+  /* 模式通道的滑杆旁边直接标出落在哪个区：判定的分界在 1500 */
+  for (let i = 0; i < RC_CH; i++) {
+    const sl = $("rcm" + i), out = $("rcm" + i + "v");
+    sl.addEventListener("input", () => {
+      out.textContent = sl.value;
+      if (i === 0) $("rcm0zone").textContent = (Number(sl.value) >= 1500) ? "手动区" : "自动区";
+    });
+  }
+}
+
+function showTab(name) {
+  activeTab = name;
+  document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  $("view-monitor").hidden = (name !== "monitor");
+  $("view-settings").hidden = (name !== "settings");
+  /* canvas 在 hidden 容器里 clientWidth 为 0，切回来必须重画一次 */
+  if (name === "monitor") drawChart();
 }
 
 function drawChart() {
   const cv = $("chart"), ctx = cv.getContext("2d");
-  const W = cv.width = cv.clientWidth * 2, H = cv.height = 220 * 2;
+  const W = cv.width = (cv.clientWidth || 800) * 2, H = cv.height = 220 * 2;
   ctx.clearRect(0, 0, W, H);
   const n = hist.t.length; if (!n) return;
   const t0 = hist.t[0], t1 = hist.t[n - 1] || t0;
@@ -160,21 +357,58 @@ function drawChart() {
   ctx.fillStyle = "#777"; ctx.font = "20px sans-serif"; ctx.fillText(String(Math.round(yMax)) + " RPM", 8, 28);
 }
 
+/* 表单回显：只写非编辑中的字段，用户正在改的卡片整组跳过 */
+function echoNum(el, v) {
+  if (el && document.activeElement !== el) el.value = v;
+}
+function echoChk(el, v) {
+  if (el && document.activeElement !== el) el.checked = !!v;
+}
+
 function applyFrame(f) {
   const wheels = f.collectors && f.collectors.find(c => c.type === "wheel_speed");
-  $("src").textContent = (wheels && wheels.src === "sim") ? "模拟" : "PCNT 霍尔";
+  const servo = f.collectors && f.collectors.find(c => c.type === "servo");
+  const rc = f.collectors && f.collectors.find(c => c.type === "rc");
+
+  if (wheels) $("src").textContent = (wheels.src === "sim") ? "模拟" : "PCNT 霍尔";
+  else if (servo) $("src").textContent = (servo.src === "sim") ? "模拟" : "LEDC";
   $("heap").textContent = f.sys ? (f.sys.free_heap / 1024).toFixed(0) + " KB" : "—";
   $("uptime").textContent = f.sys ? f.sys.uptime_s + " s" : "—";
+
   const io = $("io").children;
-  f.sys && f.sys.gpio.forEach((v, i) => { io[i].textContent = "G" + i + " " + (v ? "高" : "低"); io[i].className = "cell " + (v ? "hi" : "lo"); });
-  if (!wheels) return;
+  f.sys && f.sys.gpio.forEach((v, i) => {
+    io[i].textContent = "G" + i + " " + (v ? "高" : "低");
+    io[i].className = "cell " + (v ? "hi" : "lo");
+  });
+
+  if (wheels) renderWheels(wheels);
+  if (servo) renderServo(servo);
+  if (rc) renderRc(rc);
+
+  if (wheels) {
+    const t = f.t || 0;
+    hist.t.push(t);
+    wheels.wheels.forEach((w, i) => hist.rpm[i].push(w.rpm || 0));
+    const keep = 800;
+    while (hist.t.length > keep) { hist.t.shift(); hist.rpm.forEach(a => a.shift()); }
+    if (activeTab === "monitor") drawChart();
+  }
+}
+
+function renderWheels(wheels) {
   const cfg = wheels.cfg || {};
-  $("magnets").value = cfg.magnets ?? 1;
-  $("diam").value = cfg.diam_mm ?? 100;
-  $("alpha").value = cfg.alpha ?? 0.3;
-  $("debounce").value = 0;
-  $("sim-toggle").checked = !!cfg.sim;
-  cfg.sim_rpm && cfg.sim_rpm.forEach((v, i) => { $("sim" + i).value = v; });
+  if (!dirty.cfg) {
+    echoNum($("magnets"), cfg.magnets ?? 1);
+    echoNum($("diam"), cfg.diam_mm ?? 105);
+    echoNum($("alpha"), cfg.alpha ?? 0.3);
+    echoNum($("debounce"), cfg.debounce_ms ?? 0);
+    /* 启用状态挂在每轮上（wheels[i].en），不在 cfg 块里——cfg 只回显标量配置 */
+    wheels.wheels.forEach((w, i) => echoChk($("en" + i), w.en));
+  }
+  if (!dirty.sim) {
+    echoChk($("sim-toggle"), cfg.sim);
+    cfg.sim_rpm && cfg.sim_rpm.forEach((v, i) => echoNum($("sim" + i), v));
+  }
   wheels.wheels.forEach((w, i) => {
     $("rpm" + i).innerHTML = fmt(w.rps, 2) + " <small>转/秒</small>";
     $("rpmraw" + i).textContent = fmt(w.rpm, 0) + " RPM";
@@ -184,12 +418,121 @@ function applyFrame(f) {
     $("trig" + i).className = "trigger" + (w.trigger ? " on" : "");
     $("en-note" + i).textContent = w.en ? "" : "(禁用)";
   });
-  const t = f.t || 0;
-  hist.t.push(t);
-  wheels.wheels.forEach((w, i) => hist.rpm[i].push(w.rpm || 0));
-  const keep = 800;
-  while (hist.t.length > keep) { hist.t.shift(); hist.rpm.forEach(a => a.shift()); }
-  drawChart();
+}
+
+function renderServo(sv) {
+  const cfg = sv.cfg || {};
+  if (!dirty.servo) echoServoCfg(sv, cfg);
+
+  /* 报的是"实际在跑哪个执行器"，不是"配置里勾了哪个"。两者不一致只可能是
+   * LEDC 初始化失败——那是必须让人看见的事，所以标红而不是悄悄显示成模拟。 */
+  const ssrc = $("ssrc");
+  const mismatch = (cfg.sim === false) && (sv.src !== "ledc");
+  ssrc.textContent = (sv.src === "ledc") ? "实际输出：LEDC GPIO41/42" : "实际输出：模拟模型";
+  ssrc.className = mismatch ? "slip" : "note";
+  if (mismatch) ssrc.textContent += "（LEDC 未起来，看串口日志）";
+
+  sv.servos.forEach((s, i) => {
+    /* 进度条的两端就是该通道的两个落点（两档式，行程中没有其它位置）。
+     * 装反的轴两档是反的，用 min/max 兜住，条子方向才不会倒过来。 */
+    const unlock = (cfg.unlock_us || [])[i] ?? 1500, lock = (cfg.lock_us || [])[i] ?? 2000;
+    const lo = Math.min(unlock, lock), hi = Math.max(unlock, lock), span = Math.max(1, hi - lo);
+    $(`sdet${i}`).textContent = `解锁 ${unlock} / 锁定 ${lock}`;
+    const badge = $("sphase" + i);
+    if (sv.mode === "manual") {
+      /* 手动模式下状态机根本不跑、phase 恒为 idle，拿它显示"锁没锁"是撒谎：
+       * 遥控把脉宽推到锁定档时状态机确实是 idle。改看指令脉宽落在哪一档——
+       * 手动模式本来就是"给多少输出多少"，落在哪一档就是哪个物理位置。 */
+      if (Math.abs(s.target_us - lock) <= DETENT_TOL_US) {
+        badge.textContent = "锁定位";
+        badge.className = "badge locked";
+      } else if (Math.abs(s.target_us - unlock) <= DETENT_TOL_US) {
+        badge.textContent = "解锁位";
+        badge.className = "badge idle";
+      } else {
+        badge.textContent = "手动";
+        badge.className = "badge manual";
+      }
+    } else {
+      badge.textContent = PHASE_TEXT[s.phase] || s.phase;
+      badge.className = "badge " + s.phase;
+    }
+    /* 模式来源要写出来：遥控接管时页面上的"自动/手动"是生效值，不是设置页那一栏 */
+    $("smode" + i).textContent = (sv.mode === "manual" ? "手动" : "自动") +
+      (sv.mode_src === "rc" ? "（遥控）" : "（设置）") + (s.en ? "" : " · 已禁用");
+    /* 方向标签只在速差有意义时给。原来只在"右侧更快"那半边判了门槛，左侧
+     * 只要 al>ar 就挂着：EMA 收敛后两轮能差到 1e-7，标签却永远下不来。 */
+    $("sslip" + i).textContent = (s.ratio > 0.01) ? (s.slip_left ? "左侧更快" : "右侧更快") : "";
+    $("sreached" + i).textContent = s.reached ? "✓ 已到位" : "";
+    $("stgt" + i).textContent = s.target_us + "µs";
+    $("scur" + i).textContent = fmt(s.cur_us, 0) + "µs";
+    $("shold" + i).textContent = s.phase === "idle" ? "—" : (s.hold_ms / 1000).toFixed(1) + "s";
+    $("sratio" + i).textContent = fmt(s.ratio * 100, 0) + "%";
+    $("sbar" + i).style.width = Math.max(0, Math.min(100, (s.cur_us - lo) / span * 100)) + "%";
+    $("stick" + i).style.left = Math.max(0, Math.min(100, (s.target_us - lo) / span * 100)) + "%";
+  });
+}
+
+function echoServoCfg(sv, cfg) {
+  echoChk($("servo-sim"), cfg.sim);
+  for (let i = 0; i < SERVO; i++) {
+    echoChk($("sen" + i), (sv.servos[i] || {}).en);
+    if (cfg.unlock_us) echoNum($("unlock" + i), cfg.unlock_us[i]);
+    if (cfg.lock_us) echoNum($("lock" + i), cfg.lock_us[i]);
+    const sl = $("man" + i);
+    if (document.activeElement !== sl && cfg.manual_us) {
+      sl.value = cfg.manual_us[i];
+      $("man" + i + "v").textContent = cfg.manual_us[i];
+    }
+  }
+  const radios = document.querySelectorAll('input[name="servo-mode"]');
+  radios.forEach(r => { if (document.activeElement !== r) r.checked = (r.value === cfg.mode); });
+  echoNum($("sengage"), cfg.engage);
+  echoNum($("sminrpm"), cfg.min_rpm);
+  echoNum($("shold"), cfg.hold_ms);
+  echoNum($("sholdmax"), cfg.hold_max_ms);
+  echoNum($("sprobe"), cfg.probe_ms);
+  echoNum($("sspeed"), cfg.sim_speed);
+}
+
+function renderRc(rv) {
+  const cfg = rv.cfg || {};
+  if (!dirty.rc) {
+    echoChk($("rc-sim"), cfg.sim);
+    for (let i = 0; i < RC_CH; i++) {
+      const sl = $("rcm" + i);
+      if (document.activeElement !== sl && cfg.sim_us) {
+        sl.value = cfg.sim_us[i];
+        $("rcm" + i + "v").textContent = cfg.sim_us[i];
+      }
+    }
+    $("rcm0zone").textContent = (Number($("rcm0").value) >= 1500) ? "手动区" : "自动区";
+  }
+
+  const src = $("rc-src");
+  src.textContent = RC_SRC_TEXT[rv.src] || rv.src;
+  src.className = (rv.src === "none") ? "slip" : "note";
+
+  (rv.ch || []).forEach((c, i) => {
+    $("rcu" + i).textContent = c.seen ? c.us + "µs" : "—";
+    const st = $("rcs" + i);
+    if (c.valid) {
+      st.textContent = (i === 0) ? ((c.us >= 1500) ? "手动区" : "自动区") : "有信号";
+      st.className = "note";
+    } else {
+      /* "从未收到"（线没接）和"超时"（掉线了）分开写：调试时指向的动作完全不同 */
+      st.textContent = c.seen ? `无信号（${c.age_ms}ms 前）` : "从未收到";
+      st.className = "slip";
+    }
+  });
+  /* 每根差速轴此刻吃的是透传还是滑杆，接在通道行后面 */
+  (rv.target || []).forEach((t, i) => {
+    const st = $("rcs" + (i + 1));
+    st.textContent += ` → ${t.from_rc ? "透传" : "回落滑杆"} ${t.us}µs`;
+  });
+
+  $("rc-mode").textContent = (rv.mode === "manual" ? "手动" : "自动") +
+    (rv.mode_src === "rc" ? "（来自遥控）" : "（来自设置）");
 }
 
 function connectWS() {
@@ -215,23 +558,65 @@ function applyCfg() {
     debounce_ms: parseInt($("debounce").value, 10),
     en: [0, 1, 2, 3].map(i => $("en" + i).checked),
   });
+  dirty.cfg = false;
 }
+
 function applySim() {
   send({
     type: "set_cfg",
     sim: $("sim-toggle").checked,
     sim_rpm: [0, 1, 2, 3].map(i => parseFloat($("sim" + i).value) || 0),
   });
+  dirty.sim = false;
+}
+
+/* 舵机配置单独一条命令：全字段一起提交，
+ * 三组脉宽数组与保持上限的跨字段校验才能一次拿到一致的一组值 */
+function applyServoCfg() {
+  const mode = document.querySelector('input[name="servo-mode"]:checked');
+  send({
+    type: "set_cfg",
+    servo_sim: $("servo-sim").checked,
+    servo_mode: mode ? mode.value : "auto",
+    servo_en: [0, 1].map(i => $("sen" + i).checked),
+    servo_unlock_us: [0, 1].map(i => parseInt($("unlock" + i).value, 10)),
+    servo_lock_us: [0, 1].map(i => parseInt($("lock" + i).value, 10)),
+    servo_manual_us: [0, 1].map(i => parseInt($("man" + i).value, 10)),
+    slip_engage_ratio: parseFloat($("sengage").value),
+    slip_min_rpm: parseFloat($("sminrpm").value),
+    lock_hold_ms: parseInt($("shold").value, 10),
+    lock_hold_max_ms: parseInt($("sholdmax").value, 10),
+    probe_window_ms: parseInt($("sprobe").value, 10),
+    servo_sim_speed_us_s: parseInt($("sspeed").value, 10),
+  });
+  dirty.servo = false;
+}
+
+function applyRcSim() {
+  send({
+    type: "set_cfg",
+    rc_sim: $("rc-sim").checked,
+    rc_sim_us: [0, 1, 2].map(i => parseInt($("rcm" + i).value, 10)),
+  });
+  dirty.rc = false;
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   buildPanels();
+  document.querySelectorAll("nav.tabs button").forEach(b => { b.onclick = () => showTab(b.dataset.tab); });
+  /* 用户一动表单就标记该组为脏，回显让位；点「应用」提交后清零 */
+  document.querySelectorAll("[data-echo-group]").forEach(card => {
+    card.addEventListener("input", () => { dirty[card.dataset.echoGroup] = true; });
+    card.addEventListener("change", () => { dirty[card.dataset.echoGroup] = true; });
+  });
   $("cfg-apply").onclick = applyCfg;
   $("sim-apply").onclick = applySim;
+  $("servo-apply").onclick = applyServoCfg;
+  $("rc-apply").onclick = applyRcSim;
   $("reset-counts").onclick = () => send({ type: "reset_counts" });
   connectWS();
   setInterval(poll, 2000);
-  setInterval(() => { if (lastFrame) drawChart(); }, 1000);
+  setInterval(() => { if (lastFrame && activeTab === "monitor") drawChart(); }, 1000);
 });
 </script>
 </body>

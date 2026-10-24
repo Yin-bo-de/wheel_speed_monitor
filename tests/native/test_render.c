@@ -103,6 +103,17 @@ static void test_rps_rendered(void)
     assert_contains(buf, "\"rps\":4.5");
 }
 
+/* 7. 去抖值随配置回显（此前前端硬编码 0，改了配置回显不回去） */
+static void test_debounce_echoed(void)
+{
+    fresh();
+    rs.debounce_ms = 25;
+    char buf[600];
+    size_t used = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, wheel_render_block(&rs, buf, sizeof(buf), &used));
+    assert_contains(buf, "\"debounce_ms\":25");
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_all_required_fields, "test_all_required_fields", __LINE__);
     UnityDefaultTestRun(test_float_format_fixed, "test_float_format_fixed", __LINE__);
@@ -110,4 +121,5 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_buffer_too_small, "test_buffer_too_small", __LINE__);
     UnityDefaultTestRun(test_deterministic_render, "test_deterministic_render", __LINE__);
     UnityDefaultTestRun(test_rps_rendered, "test_rps_rendered", __LINE__);
+    UnityDefaultTestRun(test_debounce_echoed, "test_debounce_echoed", __LINE__);
 )

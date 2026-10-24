@@ -32,11 +32,12 @@ esp_err_t wheel_render_block(const wheel_render_state_t *rs,
     }
 
     RENDER_SNPRINTF("],\"cfg\":{\"magnets\":%lu,\"diam_mm\":%lu,\"alpha\":%.2f,"
-                    "\"sim\":%s,\"sim_rpm\":[%.1f,%.1f,%.1f,%.1f]}}",
+                    "\"debounce_ms\":%lu,\"sim\":%s,\"sim_rpm\":[%.1f,%.1f,%.1f,%.1f]}}",
                     (unsigned long)rs->magnets, (unsigned long)rs->wheel_diam_mm,
-                    rs->alpha,
+                    (double)rs->alpha, (unsigned long)rs->debounce_ms,
                     rs->sim_on ? "true" : "false",
-                    rs->sim_rpm[0], rs->sim_rpm[1], rs->sim_rpm[2], rs->sim_rpm[3]);
+                    (double)rs->sim_rpm[0], (double)rs->sim_rpm[1],
+                    (double)rs->sim_rpm[2], (double)rs->sim_rpm[3]);
 
 #undef RENDER_SNPRINTF
 
