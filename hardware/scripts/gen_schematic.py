@@ -7,12 +7,13 @@
     默认输出 ../wheel_carrier/wheel_carrier.kicad_sch
 
 图纸内容全部由本文件的常量定义（引脚映射 / 元件表 / 布局坐标 / 网络标签）：
-- 开发板两排 20 针排母（J1/J2）：针号 = 物理位置，名 = 板上 GPIO 功能；
-  针号 1 从开发板远离 USB 口的一端数起。
-- 霍尔×4 / 舵机×2 / 遥控×3，全部 3 针接口，统一「信号 / +5V / GND」。
-- 5V 输入 → 防反接二极管 → 5V 主路（大电容 + 指示灯 + 电源旗标）；
-  经第二只二极管给开发板 5V 脚（防止 USB 与底板互相倒灌）。
-- 霍尔信号各配 10k 上拉到 +3V3（上拉电压取 3.3V，传感器 VCC 走 5V——
+- 开发板两排 20 针排母：J1 顶排接开发板右排（IO43 列），J2 底排接左排
+  （3V3 列），正面插装；针号 = 物理位置，针 1 从远离 USB 的一端数起。
+- 接口：霍尔×4 为 +V/GND/信号（脚序对 A3144）；舵机×2 为 信号/+5V/GND；
+  遥控三通道合并成一个 3 针信号排针，接收机的电源和地走 J17。
+- BEC 输入 → 防反接二极管 → +BEC 主路（霍尔、J16/J17、电源条、降压段）；
+  LM2596 降到 +5V 供开发板和两路舵机。
+- 霍尔信号各配 10k 上拉到 +3V3（上拉取 3.3V，传感器 VCC 走 BEC——
   A3144 开集电极输出，高电平由 3.3V 上拉决定，对 GPIO 安全）。
 
 坐标全部落在 1.27mm 网格（g() 会断言）；uuid 用 uuid5 从固定种子派生，
@@ -45,8 +46,8 @@ ROOT_UUID = "11111111-2222-4333-8444-555555555555"
 NS = _uuid.UUID(ROOT_UUID)
 
 TITLE = "轮速监测台转接底板"
-DATE = "2026-10-11"
-REV = "v4"
+DATE = "2026-10-28"
+REV = "v6"
 PAPER = "A3"
 
 
@@ -313,7 +314,7 @@ def custom_lib_node():
 
 # ---------------------------------------------------------------- 布局常量
 
-# 开发板两排针座（J1 左排、J2 右排），原点取针列中点
+# 开发板两排针座（J1 顶排=右排、J2 底排=左排），原点取针列中点
 J1_AT = (139.7, 119.38)
 J2_AT = (280.67, 119.38)
 
@@ -335,15 +336,16 @@ ROW_R_NETS = {
 # 右侧接口列：3 针接口从上到下
 CONN_COL_X = 337.82
 CONN_ROWS = [
-    ("J3", "霍尔·左前", "GPIO1", 96.52),
-    ("J5", "霍尔·左后", "GPIO21", 109.22),
-    ("J6", "霍尔·右后", "GPIO47", 121.92),
-    ("J7", "舵机·前差速", "GPIO41", 134.62),
-    ("J8", "舵机·后差速", "GPIO42", 147.32),
-    ("J9", "遥控·模式", "GPIO38", 160.02),
-    ("J10", "遥控·前差速", "GPIO39", 172.72),
-    ("J11", "遥控·后差速", "GPIO40", 185.42),
+    ("J3", "霍尔·左前", "GPIO1", 96.52, "hall"),
+    ("J5", "霍尔·左后", "GPIO21", 109.22, "hall"),
+    ("J6", "霍尔·右后", "GPIO47", 121.92, "hall"),
+    ("J7", "舵机·前差速", "GPIO41", 134.62, "servo"),
+    ("J8", "舵机·后差速", "GPIO42", 147.32, "servo"),
+    ("J9", "遥控·三通道信号", "GPIO38", 160.02, "rc"),
 ]
+# 遥控三通道只留一个 3 针信号排针：1=模式、2=前差速、3=后差速。
+# 接收机的电源和地仍走 J17（油门直通口），这里不引出 +V/GND。
+RC_PINS = (("1", "GPIO38"), ("2", "GPIO39"), ("3", "GPIO40"))
 # 上拉电阻列（与各自接口同高）
 PULLUP_X = 354.33
 PULLUPS = [("R1", "GPIO1", 96.52), ("R3", "GPIO21", 109.22), ("R4", "GPIO47", 121.92)]
@@ -354,31 +356,34 @@ R2_AT = (76.2, 128.27)
 
 def build():
     # ---- 两排针座 -----------------------------------------------------------
-    j1 = place("J1", "wheel_carrier:DevBoard_Row_L", "开发板左排 20P", J1_AT,
+    # v6：开发板改为正面插装。J1 顶排接开发板右排（IO43 列），J2 底排接左排
+    # （3V3 列）；针 1 仍在远离 USB 的一端（左端）。这样天线朝左、USB 朝右，
+    # 和 v5 反面插时的物理朝向一致，USB 线不会撞左侧的 J16/J17。
+    j1 = place("J1", "wheel_carrier:DevBoard_Row_R", "开发板排母1·右排 IO43 列", J1_AT,
                fp="Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical",
                props={"Reference": (-20.32, -27.94, "left"), "Value": (0, -29.21, None)})
-    j2 = place("J2", "wheel_carrier:DevBoard_Row_R", "开发板右排 20P", J2_AT,
+    j2 = place("J2", "wheel_carrier:DevBoard_Row_L", "开发板排母2·左排 3V3 列", J2_AT,
                fp="Connector_PinSocket_2.54mm:PinSocket_1x20_P2.54mm_Vertical",
                props={"Reference": (20.32, -27.94, "right"), "Value": (0, -29.21, None)})
-    for inst, nets, direction in ((j1, ROW_L_NETS, "left"), (j2, ROW_R_NETS, "right")):
+    for inst, nets, direction in ((j1, ROW_R_NETS, "right"), (j2, ROW_L_NETS, "left")):
         for num in sorted(inst["pins"], key=int):
             stub_label(inst, num, direction, nets[num])
 
     # ---- 扩展排针：开发板 40 针 1:1 引出 --------------------------------------
     # 没在用的脚全部引到这里：将来固件用新脚（I2C 传感器、IO 复用等）插线即可，
     # 不用重新打板。丝印上每针标 GPI0 号、特殊脚打警示，在布局阶段做。
-    j13 = place("J13", "Connector_Generic:Conn_01x20", "扩展·左排(直连 J1)",
+    j13 = place("J13", "Connector_Generic:Conn_01x20", "扩展·排母1(直连 J1/右排)",
                 (200.66, 133.35),
                 fp="Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Vertical",
                 props={"Reference": (0, -29.21, None), "Value": (0, 29.21, None)})
     for num in sorted(j13["pins"], key=int):
-        stub_label(j13, num, "left", ROW_L_NETS[num])
-    j14 = place("J14", "Connector_Generic:Conn_01x20", "扩展·右排(直连 J2)",
+        stub_label(j13, num, "left", ROW_R_NETS[num])
+    j14 = place("J14", "Connector_Generic:Conn_01x20", "扩展·排母2(直连 J2/左排)",
                 (241.3, 133.35),
                 fp="Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Vertical",
                 props={"Reference": (0, -29.21, None), "Value": (0, 29.21, None)})
     for num in sorted(j14["pins"], key=int):
-        stub_label(j14, num, "left", ROW_R_NETS[num])
+        stub_label(j14, num, "left", ROW_L_NETS[num])
     # 电源排针：接 IMU/传感器模块的取电口，省得从别处飞线。v4 扩成 2×8：
     # 2×BEC、3×+5V、3×+3V3，其余 8 针全 GND——一根 2.54 针只插得下一根杜邦线，
     # 传感器多了原版 4 针不够用；每一路电源旁边都紧挨着一根地线。
@@ -395,7 +400,7 @@ def build():
     # 电调的 3 针插头从这里进板：BEC 电压上 +BEC 轨（三针插头中间那根必是 +V，
     # 插反只会信号和地换位，电源接不反）；油门信号经板上直通走线送到 J17，
     # 再用杜邦线接回接收机的油门通道。直通是纯铜走线——板子不通电也照传，
-    # 主控没上电不会断油门。J17 顺带把 BEC 电压送给接收机（同 J9~J11）。
+    # 主控没上电不会断油门。J17 仍是接收机唯一的电源/地入口；J9 只回三路信号。
     j16 = place("J16", "Connector_Generic:Conn_01x03", "电调·BEC输入", (254, 196.85),
                 fp="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
                 props={"Reference": (2.54, -3.81, "left"), "Value": (-13.97, 3.81, "right")})
@@ -408,14 +413,27 @@ def build():
         stub_label(inst, "3", "left", "GND")
 
     # ---- 右侧 3 针接口列 + 上拉 ---------------------------------------------
-    for ref, value, sig, y in CONN_ROWS:
+    for ref, value, sig, y, kind in CONN_ROWS:
         inst = place(ref, "Connector_Generic:Conn_01x03", value, (CONN_COL_X, y),
                      fp="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
                      # 编号挪到器件右侧：左侧右对齐的"J3"正好跟"GPIO1"标签贴死
                      props={"Reference": (2.54, -3.81, "left"), "Value": (-13.97, 3.81, "right")})
-        stub_label(inst, "1", "left", sig)
-        stub_label(inst, "2", "left", "+BEC")
-        stub_label(inst, "3", "left", "GND")
+        if kind == "hall":
+            # A3144：1=VCC、2=GND、3=OUT；板上 1 脚接 +BEC
+            stub_label(inst, "1", "left", "+BEC")
+            stub_label(inst, "2", "left", "GND")
+            stub_label(inst, "3", "left", sig)
+        elif kind == "servo":
+            # 舵机固定吃板载 5V，不再直接吃 BEC
+            stub_label(inst, "1", "left", sig)
+            stub_label(inst, "2", "left", "+5V")
+            stub_label(inst, "3", "left", "GND")
+        elif kind == "rc":
+            # J9 是遥控三通道合一的信号排针，没有 +V/GND
+            for num, net in RC_PINS:
+                stub_label(inst, num, "left", net)
+        else:
+            raise ValueError(f"{ref} 的接口类型 {kind!r} 不认识")
     for ref, sig, y in PULLUPS:
         r = place(ref, "Device:R", "10k", (PULLUP_X, y), fp=R_FP,
                   props={"Reference": (-2.54, -1.27, "right"), "Value": (-2.54, 1.27, "right")})
@@ -434,9 +452,9 @@ def build():
     j4 = place("J4", "Connector_Generic:Conn_01x03", "霍尔·右前", J4_AT,
                fp="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
                props={"Reference": (2.54, -3.81, "left"), "Value": (-13.97, 3.81, "right")})
-    stub_label(j4, "1", "left", "GPIO14")
-    stub_label(j4, "2", "left", "+BEC")
-    stub_label(j4, "3", "left", "GND")
+    stub_label(j4, "1", "left", "+BEC")
+    stub_label(j4, "2", "left", "GND")
+    stub_label(j4, "3", "left", "GPIO14")
     r2 = place("R2", "Device:R", "10k", R2_AT, fp=R_FP,
                props={"Reference": (2.54, -1.27, "left"), "Value": (2.54, 1.27, "left")})
     pin_label(r2, "1", "+3V3", "left")
@@ -523,7 +541,7 @@ def build():
                fp="Inductor_THT:L_Radial_D10.0mm_P5.00mm_Fastron_07P",
                props={"Reference": (0, -6.35, None), "Value": (0, -8.89, None)})
     add_wire(161.29, 243.84, 161.29, 246.38, "C4-top")
-    c4 = place("C4", "Device:C_Polarized", "220µF/16V", (161.29, 250.19), fp=CP_FP,
+    c4 = place("C4", "Device:C_Polarized", "1000µF/16V", (161.29, 250.19), fp=CP_FP,
                props={"Reference": (-2.54, -1.27, "right"), "Value": (-2.54, 1.27, "right")})
     add_wire(161.29, 254, 161.29, 256.54, "C4-gnd")
     add_label("GND", 161.29, 256.54, "right")
@@ -559,12 +577,12 @@ def build():
     # PWR_FLAG 是例外——它不改网络名，只负责让 ERC 认可母线有驱动源。
 
     # ---- 图面文字说明 ---------------------------------------------------------
-    add_text("针号 1 从开发板远离 USB 口的一端数起；装板前对开发板丝印核一遍", 127.0, 88.9)
-    add_text("扩展排针 J13/J14 直连开发板全部 40 针；J15 电源排针 BEC×2/5V×3/3V3×3，其余全是地", 170.18, 99.06)
+    add_text("正面插装：J1 对开发板右排 IO43 列，J2 对左排 3V3 列；针号 1 在远离 USB 的一端", 127.0, 88.9)
+    add_text("扩展排针 J13/J14 直连开发板全部 40 针（J13=J1、J14=J2）；J15 电源排针 BEC×2/5V×3/3V3×3", 170.18, 99.06)
     add_text("35/36/37=PSRAM，19/20=USB，0/3/45/46=启动脚：接外部电路前先看 README", 170.18, 101.6)
-    add_text("J16 接电调（BEC 进板）；油门信号经底板直通到 J17，再回接收机油门通道", 254.0, 210.82)
-    add_text("BEC 输入 6~7.4V：板上降到 5V 给开发板；舵机/接收机/霍尔走 BEC 原电压", 105.41, 270.51)
-    add_text("接口顺序统一：信号 / BEC / GND，与舵机、接收机插头一致", 320.04, 88.9)
+    add_text("J16 接电调（BEC 进板）；油门信号经底板直通到 J17，再回接收机油门通道；J17 给接收机供电", 254.0, 210.82)
+    add_text("BEC 输入 6~7.4V：板上降到 5V 给开发板和舵机；霍尔、J16/J17 走 BEC 原电压", 105.41, 270.51)
+    add_text("舵机：信号/5V/GND；霍尔：+V/GND/信号（A3144）；遥控 J9：三路信号，无电源/地", 320.04, 88.9)
     add_text("霍尔指示灯：亮 = 磁铁触发（信号被拉低）；轮子转动能看到闪烁", 354.33, 83.82)
 
 
