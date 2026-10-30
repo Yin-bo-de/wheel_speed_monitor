@@ -39,6 +39,14 @@ void cfg_params_default(cfg_params_t *cfg)
     cfg->rc_sim_us[0] = 1000;
     cfg->rc_sim_us[1] = 1500;
     cfg->rc_sim_us[2] = 1500;
+
+    /* 摄像头默认按需启动：手机连上热点、打开设置页都不采集。验证台一行
+     * 预览请求就够启动，保留 always 给调试常开用。 */
+    cfg->cam_policy = CFG_CAM_POLICY_ON_DEMAND;
+    cfg->cam_res = CFG_CAM_RES_QVGA;
+    cfg->cam_quality = 12;
+    cfg->cam_fps_cap = 15;
+    cfg->overlay_mask = CFG_CAM_OVERLAY_ALL;
 }
 
 /* 脉宽数组（两档与手动目标同量程）：逐元素判边界，前后轴互不牵连——
@@ -128,6 +136,29 @@ esp_err_t cfg_params_validate(const cfg_params_t *cfg, const char *field)
             if (cfg->rc_sim_us[i] < CFG_SERVO_US_MIN || cfg->rc_sim_us[i] > CFG_SERVO_US_MAX) {
                 return ESP_ERR_INVALID_ARG;
             }
+        }
+    } else if (strcmp(field, "cam_policy") == 0) {
+        if (cfg->cam_policy > CFG_CAM_POLICY_ALWAYS) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "cam_res") == 0) {
+        if (cfg->cam_res > CFG_CAM_RES_SVGA) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "cam_quality") == 0) {
+        if (cfg->cam_quality < CFG_CAM_QUALITY_MIN ||
+            cfg->cam_quality > CFG_CAM_QUALITY_MAX) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "cam_fps_cap") == 0) {
+        if (cfg->cam_fps_cap < CFG_CAM_FPS_MIN || cfg->cam_fps_cap > CFG_CAM_FPS_MAX) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "overlay_mask") == 0) {
+        /* 未知位整条拒绝：前端只认低 4 位，固件多收的位只会造成
+         * "勾选项存在但没人画"的静默不一致。 */
+        if ((cfg->overlay_mask & ~CFG_CAM_OVERLAY_ALL) != 0) {
+            return ESP_ERR_INVALID_ARG;
         }
     }
     /* en/sim/sim_rpm/servo_en 为 bool 数组，JSON 解析层负责类型约束 */
@@ -292,6 +323,28 @@ static void unpack_v4_segment(const uint8_t *buf, cfg_params_t *out)
     }
 }
 
+/* ---- v5 段（84..91）：摄像头 ----
+ * 四个单字节字段放前面，末 4 字节是叠加位图。这样 v4 的 0..83 一个字节
+ * 都不动，旧固件写的 blob 在新固件里照常解出，升级只补默认值。 */
+
+static void pack_v5_segment(const cfg_params_t *cfg, uint8_t *buf)
+{
+    buf[84] = (uint8_t)cfg->cam_policy;
+    buf[85] = (uint8_t)cfg->cam_res;
+    buf[86] = (uint8_t)cfg->cam_quality;
+    buf[87] = (uint8_t)cfg->cam_fps_cap;
+    memcpy(buf + 88, &cfg->overlay_mask, 4);
+}
+
+static void unpack_v5_segment(const uint8_t *buf, cfg_params_t *out)
+{
+    out->cam_policy = buf[84];
+    out->cam_res = buf[85];
+    out->cam_quality = buf[86];
+    out->cam_fps_cap = buf[87];
+    memcpy(&out->overlay_mask, buf + 88, 4);
+}
+
 esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
 {
     if (cfg == NULL || buf == NULL || len < CFG_PARAMS_BLOB_SIZE) {
@@ -301,6 +354,7 @@ esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
     pack_v1_segment(cfg, buf);
     pack_v3_segment(cfg, buf);
     pack_v4_segment(cfg, buf);
+    pack_v5_segment(cfg, buf);
     return ESP_OK;
 }
 
@@ -337,6 +391,15 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v3_segment(buf, out);
         return ESP_OK; /* 遥控字段保持默认；上层随后回写最新版 */
     }
+    if (buf[0] == CFG_PARAMS_BLOB_VERSION_4) {
+        if (len < CFG_PARAMS_BLOB_SIZE_V4) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        unpack_v1_segment(buf, out);
+        unpack_v3_segment(buf, out);
+        unpack_v4_segment(buf, out);
+        return ESP_OK; /* 摄像头字段保持默认；上层随后回写 v5 */
+    }
     if (buf[0] == CFG_PARAMS_BLOB_VERSION) {
         if (len < CFG_PARAMS_BLOB_SIZE) {
             return ESP_ERR_INVALID_ARG;
@@ -344,6 +407,7 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v1_segment(buf, out);
         unpack_v3_segment(buf, out);
         unpack_v4_segment(buf, out);
+        unpack_v5_segment(buf, out);
         return ESP_OK;
     }
     return ESP_ERR_INVALID_VERSION;

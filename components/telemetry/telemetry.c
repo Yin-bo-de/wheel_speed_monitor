@@ -19,6 +19,34 @@ typedef struct {
 
 static telem_slot_t g_slots[TELEM_MAX_COLLECTORS];
 static uint8_t g_gpio_levels[4]; /* sys 块原始 IO 电平（由采样任务喂值） */
+static uint32_t g_internal_heap; /* sys 块内部 RAM 余量（PSRAM 不在此列） */
+
+/* 相机状态用内部定长数组存：调用方传的是指针，框架不能假设它一直有效。 */
+typedef struct {
+    char policy[16];
+    char state[8];
+    bool preview_active;
+    bool streaming;
+    uint8_t clients;
+    uint32_t stop_in_s;
+    char res[8];
+    uint8_t quality;
+    uint8_t fps_cap;
+    uint32_t overlay_mask;
+    float fps;
+    uint32_t bytes;
+} cam_status_copy_t;
+
+static cam_status_copy_t g_cam;
+
+static void copy_str(char *dst, size_t cap, const char *src)
+{
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    snprintf(dst, cap, "%s", src);
+}
 
 esp_err_t telem_register(const telem_collector_ops_t *ops, void *ctx)
 {
@@ -86,9 +114,23 @@ esp_err_t telem_render_frame(char *buf, size_t len, size_t *used,
     TELEM_SNPRINTF("{\"type\":\"telemetry\",\"seq\":%lu,\"t\":%lu,",
                    (unsigned long)seq, (unsigned long)now_ms);
 
-    TELEM_SNPRINTF("\"sys\":{\"gpio\":[%u,%u,%u,%u],\"free_heap\":%lu,\"uptime_s\":%lu},",
+    TELEM_SNPRINTF("\"sys\":{\"gpio\":[%u,%u,%u,%u],\"free_heap\":%lu,"
+                   "\"heap_int\":%lu,\"uptime_s\":%lu,",
                    g_gpio_levels[0], g_gpio_levels[1], g_gpio_levels[2],
-                   g_gpio_levels[3], (unsigned long)free_heap, (unsigned long)(now_ms / 1000));
+                   g_gpio_levels[3], (unsigned long)free_heap,
+                   (unsigned long)g_internal_heap, (unsigned long)(now_ms / 1000));
+
+    TELEM_SNPRINTF("\"cam\":{\"policy\":\"%s\",\"state\":\"%s\",\"preview\":\"%s\","
+                   "\"streaming\":%s,\"clients\":%u,\"stop_in_s\":%lu,"
+                   "\"res\":\"%s\",\"quality\":%u,\"fps_cap\":%u,\"overlay\":%lu,"
+                   "\"fps\":%.1f,\"bytes\":%lu}},",
+                   g_cam.policy, g_cam.state,
+                   g_cam.preview_active ? "active" : "inactive",
+                   g_cam.streaming ? "true" : "false", (unsigned)g_cam.clients,
+                   (unsigned long)g_cam.stop_in_s, g_cam.res,
+                   (unsigned)g_cam.quality, (unsigned)g_cam.fps_cap,
+                   (unsigned long)g_cam.overlay_mask, (double)g_cam.fps,
+                   (unsigned long)g_cam.bytes);
 
     TELEM_SNPRINTF("\"collectors\":[");
 
@@ -145,8 +187,35 @@ void telem_set_gpio_levels(const uint8_t levels[4])
     memcpy(g_gpio_levels, levels, sizeof(g_gpio_levels));
 }
 
+void telem_set_internal_heap(uint32_t bytes)
+{
+    g_internal_heap = bytes;
+}
+
+void telem_set_cam_status(const telem_cam_status_t *status)
+{
+    if (status == NULL) {
+        memset(&g_cam, 0, sizeof(g_cam));
+        return;
+    }
+    copy_str(g_cam.policy, sizeof(g_cam.policy), status->policy);
+    copy_str(g_cam.state, sizeof(g_cam.state), status->state);
+    g_cam.preview_active = status->preview_active;
+    g_cam.streaming = status->streaming;
+    g_cam.clients = status->clients;
+    g_cam.stop_in_s = status->stop_in_s;
+    copy_str(g_cam.res, sizeof(g_cam.res), status->res);
+    g_cam.quality = status->quality;
+    g_cam.fps_cap = status->fps_cap;
+    g_cam.overlay_mask = status->overlay_mask;
+    g_cam.fps = status->fps;
+    g_cam.bytes = status->bytes;
+}
+
 void telem_reset_for_test(void)
 {
     memset(g_slots, 0, sizeof(g_slots));
     memset(g_gpio_levels, 0, sizeof(g_gpio_levels));
+    memset(&g_cam, 0, sizeof(g_cam));
+    g_internal_heap = 0;
 }

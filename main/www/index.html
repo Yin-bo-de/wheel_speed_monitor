@@ -61,6 +61,25 @@
   .bar i { position:absolute; top:0; left:0; height:100%; background:#4fc3f7; border-radius:3px; }
   .bar u { position:absolute; top:-2px; width:2px; height:10px; background:#ffb74d; }
   .hint { font-size:11px; color:var(--dim); margin:6px 0 0; }
+
+  /* ---- 画面回传 ---- */
+  .cam-wrap { position:relative; background:#000; border:1px solid var(--border);
+    border-radius:6px; min-height:240px; overflow:hidden; }
+  .cam-wrap img { display:block; width:100%; max-height:58vh; object-fit:contain; background:#000; }
+  .cam-wrap img.flipped { transform:scale(-1,-1); }
+  .cam-wrap canvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .cam-hint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    text-align:center; padding:12px; color:#aaa; font-size:13px; background:rgba(0,0,0,0.35); }
+  .cam-tools { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin-top:8px; font-size:12px; }
+  .cam-tools label { display:flex; align-items:center; gap:4px; }
+  .cam-tools .spacer { flex:1 1 auto; }
+  .cam-status { font-variant-numeric:tabular-nums; }
+  /* 切到设置 tab 时不把预览卡移出渲染树（display:none 会让浏览器停读 MJPEG），
+     只把它移出布局并设为全透明；30 秒保持靠这条规则活着。 */
+  section.tab-passive { position:absolute; top:0; left:0; width:100%; opacity:0;
+    pointer-events:none; }
+  select { width:100%; background:#222; color:var(--text); border:1px solid var(--border);
+    border-radius:4px; padding:4px 6px; }
 </style>
 </head>
 <body>
@@ -81,6 +100,27 @@
   <h2>四轮仪表</h2>
   <div class="grid grid-4" id="wheels"></div>
 
+  <div class="card" style="margin-top:12px" id="cam-card">
+    <h2>画面回传 <span class="note cam-status" id="cam-status">—</span></h2>
+    <div class="cam-wrap" id="cam-wrap">
+      <img id="cam-view" alt="摄像头画面">
+      <canvas id="cam-overlay"></canvas>
+      <div class="cam-hint" id="cam-hint">打开预览后按需启动相机</div>
+    </div>
+    <div class="cam-tools">
+      <label><input type="checkbox" id="ov-wheels" checked> 轮速</label>
+      <label><input type="checkbox" id="ov-servo" checked> 舵机</label>
+      <label><input type="checkbox" id="ov-rc" checked> 遥控</label>
+      <label><input type="checkbox" id="ov-sys" checked> 系统</label>
+      <label><input type="checkbox" id="cam-static"> 静态帧模式</label>
+      <label><input type="checkbox" id="cam-flip"> 画面翻转</label>
+      <span class="spacer"></span>
+      <button id="cam-snap">原始快照 ⤓</button>
+    </div>
+    <p class="hint">按需采集：打开本页预览才启动相机；切到设置页后流和采集保持 30 秒，
+      30 秒内切回不断流。原始快照不带叠加，叠加层由浏览器绘制。</p>
+  </div>
+
   <h2>轮速曲线（最近 30s，RPM）</h2>
   <canvas id="chart"></canvas>
 
@@ -88,7 +128,7 @@
     <h2>原始 IO 电平监视 <span class="note">(验证接线/供电)</span></h2>
     <div class="io" id="io"></div>
     <div class="row" style="margin-top:8px"><span>信号源</span><b id="src">—</b></div>
-    <div class="row"><span>剩余内存</span><b id="heap">—</b></div>
+    <div class="row"><span>内部 RAM 余量</span><b id="heap">—</b></div>
     <div class="row"><span>运行时长</span><b id="uptime">—</b></div>
   </div>
 
@@ -211,9 +251,40 @@
       接真接收机时这个开关要保持关闭——打开会把 GPIO38/39/40 上的真实信号盖掉。</p>
   </div>
 
-  <div class="card disabled" style="margin-top:12px">
-    <h2>预留：画面回传展示信息选择 <span class="note">(二期)</span></h2>
-    <p class="hint">二期摄像头启用后，在这里选回传画面上叠加哪些信息（轮速/姿态/舵机状态等）。</p>
+  <div class="card" style="margin-top:12px" data-echo-group="cam">
+    <h2>画面回传配置 <span class="note">(NVS 持久化)</span></h2>
+    <div class="cfg-grid">
+      <div><label>相机策略</label>
+        <select id="cam-policy">
+          <option value="off">关闭</option>
+          <option value="on_demand" selected>按需（默认）</option>
+          <option value="always">常开（调试）</option>
+        </select>
+      </div>
+      <div><label>分辨率</label>
+        <select id="cam-res">
+          <option value="qvga" selected>QVGA 320×240</option>
+          <option value="vga">VGA 640×480</option>
+          <option value="svga">SVGA 800×600</option>
+        </select>
+      </div>
+      <div><label>画质 4–63（值小画质高）</label>
+        <input id="cam-quality" type="number" min="4" max="63" value="12">
+      </div>
+      <div><label>帧率上限 5–25</label>
+        <input id="cam-fps" type="number" min="5" max="25" value="15">
+      </div>
+    </div>
+    <div class="en" style="margin-top:8px">叠加项
+      <label><input type="checkbox" id="cam-ov0" checked> 轮速</label>
+      <label><input type="checkbox" id="cam-ov1" checked> 舵机</label>
+      <label><input type="checkbox" id="cam-ov2" checked> 遥控</label>
+      <label><input type="checkbox" id="cam-ov3" checked> 系统</label>
+    </div>
+    <div style="margin-top:8px"><button id="cam-apply">应用画面配置</button></div>
+    <p class="hint">按需模式下打开监测页预览才启动相机；切到设置页后流和采集保持 30 秒，
+      超时才停。改分辨率/画质时如果正在预览，相机会重启约 1–2 秒。常开是调试入口，
+      发热和功耗更高。SVGA 只建议观察用。</p>
   </div>
 </section>
 </main>
@@ -239,7 +310,18 @@ const DETENT_TOL_US = 20;
 let ws = null, reconnect = 0, lastFrame = null, activeTab = "monitor";
 const hist = { t: [], rpm: [[], [], [], []] };
 /* 用户正在编辑的卡片组：回显先跳过，免得 100ms 一帧把输入踩掉 */
-const dirty = { cfg: false, sim: false, servo: false, rc: false };
+const dirty = { cfg: false, sim: false, servo: false, rc: false, cam: false };
+
+/* 画面回传运行时状态。camStreaming 只是本地缓存，是否真的还有流以
+ * 服务端 sys.cam.streaming 为准；本地只用来避免重复设置 <img src>。 */
+let lastCam = null;
+let camStreaming = false;
+let camStreamStartedAt = 0;
+let camStatic = false;
+let camPollTimer = null;
+let camStaticUrl = null;
+let camErrorTimer = null;
+const CAM_OVERLAY_NAMES = ["轮速", "舵机", "遥控", "系统"];
 
 function $(id) { return document.getElementById(id); }
 function fmt(x, d) { return (x === null || x === undefined || isNaN(x)) ? "—" : Number(x).toFixed(d); }
@@ -325,12 +407,26 @@ function buildPanels() {
 }
 
 function showTab(name) {
+  const prev = activeTab;
   activeTab = name;
   document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
-  $("view-monitor").hidden = (name !== "monitor");
+  /* 监测页不能设 hidden（display:none 会让浏览器停读 MJPEG）：切走时只把它
+   * 移出布局并隐藏可见性，<img> 仍在渲染树里，服务端的 30 秒保持才有意义。 */
+  $("view-monitor").classList.toggle("tab-passive", name !== "monitor");
   $("view-settings").hidden = (name !== "settings");
-  /* canvas 在 hidden 容器里 clientWidth 为 0，切回来必须重画一次 */
-  if (name === "monitor") drawChart();
+  if (prev !== name) {
+    camSendPreview(name === "monitor");
+    if (name === "monitor") {
+      camSyncView();
+    } else {
+      camPollStop();
+    }
+  }
+  /* canvas 在隐藏/移出布局时 clientWidth 为 0，切回来必须重画一次 */
+  if (name === "monitor") {
+    drawChart();
+    camResizeCanvas();
+  }
 }
 
 function drawChart() {
@@ -372,7 +468,9 @@ function applyFrame(f) {
 
   if (wheels) $("src").textContent = (wheels.src === "sim") ? "模拟" : "PCNT 霍尔";
   else if (servo) $("src").textContent = (servo.src === "sim") ? "模拟" : "LEDC";
-  $("heap").textContent = f.sys ? (f.sys.free_heap / 1024).toFixed(0) + " KB" : "—";
+  /* 开 PSRAM 后 free_heap 是 MB 级，看不出内部堆压力；优先显示 heap_int */
+  const heap = f.sys ? (f.sys.heap_int ?? f.sys.free_heap) : null;
+  $("heap").textContent = (heap === null) ? "—" : (heap / 1024).toFixed(0) + " KB";
   $("uptime").textContent = f.sys ? f.sys.uptime_s + " s" : "—";
 
   const io = $("io").children;
@@ -393,6 +491,8 @@ function applyFrame(f) {
     while (hist.t.length > keep) { hist.t.shift(); hist.rpm.forEach(a => a.shift()); }
     if (activeTab === "monitor") drawChart();
   }
+  if (f.sys && f.sys.cam) camUpdate(f.sys.cam);
+  if (activeTab === "monitor") drawCamOverlay();
 }
 
 function renderWheels(wheels) {
@@ -535,9 +635,336 @@ function renderRc(rv) {
     (rv.mode_src === "rc" ? "（来自遥控）" : "（来自设置）");
 }
 
+/* ---- 画面回传 ---- */
+
+/* 某些浏览器隐私模式会禁用 localStorage；开关记忆失败不该拖垮整页。 */
+function camStoreGet(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+function camStoreSet(key, value) {
+  try { localStorage.setItem(key, value); } catch (_) {}
+}
+
+function camSendPreview(active) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cam_preview", active }));
+}
+
+function camSetHint(text) {
+  const el = $("cam-hint");
+  if (!el) return;
+  if (text) { el.textContent = text; el.style.display = "flex"; }
+  else el.style.display = "none";
+}
+
+function camStartStream(force) {
+  if (camStatic || activeTab !== "monitor" || document.hidden) return;
+  const img = $("cam-view");
+  if (!force && img.getAttribute("src")) return;
+  camStreaming = true;
+  camStreamStartedAt = Date.now();
+  /* 时间戳只用来破浏览器缓存；不靠它判断流是否还活着，服务端 sys.cam 才是准的。 */
+  img.src = "/cam/stream?t=" + camStreamStartedAt;
+  camSetHint(null);
+}
+
+function camStopStream() {
+  const img = $("cam-view");
+  if (img) img.removeAttribute("src");
+  camStreaming = false;
+}
+
+/* 切回监测 tab 时决定是复用原流还是重新请求。服务端说 streaming=true
+ * 就绝不动 src，否则第二个流请求会拿 503 把原画面顶掉。 */
+function camSyncView() {
+  if (camStatic) { camPollStart(); return; }
+  if (activeTab !== "monitor" || document.hidden) return;
+  if (lastCam && lastCam.state === "off") { camSetHint("相机已关闭"); return; }
+  const img = $("cam-view");
+  if (lastCam && lastCam.streaming && img.getAttribute("src")) return;
+  if (lastCam && lastCam.state === "init" && img.getAttribute("src")) return;
+  camStartStream(true);
+}
+
+function camWatchdog() {
+  if (camStatic || activeTab !== "monitor" || document.hidden || !lastCam) return;
+  if (lastCam.streaming) return;
+  if (lastCam.state === "off") { camSetHint("相机已关闭"); return; }
+  if (lastCam.state === "init") { camSetHint("相机启动中…"); return; }
+
+  const img = $("cam-view");
+  if (!img.getAttribute("src")) { camStartStream(true); return; }
+
+  /* 刚设置的请求可能还没被服务端登记，别立刻重发；状态 on 但 streaming
+   * 已经为 false，说明旧流确实结束（改参数重 init 后就是这种），2 秒后重连。
+   * 初始化失败不和它抢节奏，隔 8 秒再试一次，避免失败时热循环。 */
+  const elapsed = Date.now() - camStreamStartedAt;
+  if (elapsed < 2000) return;
+  if (lastCam.state === "fail" && elapsed < 8000) return;
+  camStartStream(true);
+}
+
+function camStatusText(cam) {
+  const spec = `${(cam.res || "qvga").toUpperCase()} · ${cam.fps_cap || 15}fps · q${cam.quality || 12}`;
+  if (cam.state === "off") return "相机已关闭";
+  if (cam.state === "fail") return "相机初始化失败，看串口日志";
+  if (cam.state === "init") return "相机启动中…";
+  if (cam.state === "idle") return cam.policy === "always" ? "常开待机" : "按需待机";
+  if (camStatic) return `${spec} · 静态帧模式`;
+  if (cam.streaming) {
+    if (cam.preview === "active") return `${spec} · 实际 ${fmt(cam.fps, 1)}fps · ${cam.bytes ?? 0} B/帧`;
+    return `预览暂停，${cam.stop_in_s ?? 0}s 后停止`;
+  }
+  if (cam.policy === "always") return `常开 · ${spec} · 实际 ${fmt(cam.fps, 1)}fps`;
+  return `等待停止${cam.stop_in_s ? `（${cam.stop_in_s}s）` : ""}`;
+}
+
+function camEcho(cam) {
+  if (!dirty.cam) {
+    if (document.activeElement !== $("cam-policy")) $("cam-policy").value = cam.policy || "on_demand";
+    if (document.activeElement !== $("cam-res")) $("cam-res").value = cam.res || "qvga";
+    echoNum($("cam-quality"), cam.quality ?? 12);
+    echoNum($("cam-fps"), cam.fps_cap ?? 15);
+    for (let i = 0; i < 4; i++) echoChk($("cam-ov" + i), (cam.overlay ?? 15) & (1 << i));
+  }
+  const quick = ["ov-wheels", "ov-servo", "ov-rc", "ov-sys"];
+  for (let i = 0; i < 4; i++) echoChk($(quick[i]), (cam.overlay ?? 15) & (1 << i));
+}
+
+function camUpdate(cam) {
+  lastCam = cam;
+  camStreaming = !!cam.streaming;
+  camEcho(cam);
+
+  const el = $("cam-status");
+  el.textContent = camStatusText(cam);
+  const mismatch = cam.state === "on" && cam.streaming && (cam.fps || 0) < 1;
+  el.className = "note cam-status" + ((cam.state === "fail" || mismatch) ? " slip" : "");
+
+  if (cam.state === "init") camSetHint("相机启动中…");
+  else if (cam.state === "fail") camSetHint("相机初始化失败，看串口日志");
+  else if (cam.state === "off") camSetHint("相机已关闭");
+  else if (!cam.streaming && !camStatic && cam.preview === "inactive")
+    camSetHint(`预览暂停，${cam.stop_in_s ?? 0}s 后停止`);
+  else if (!cam.streaming && !camStatic && cam.state === "on")
+    camSetHint("画面流已断开，等待重连…");
+  else if (!cam.streaming && !camStatic && cam.policy === "always")
+    camSetHint("相机常开，等待画面流…");
+  else if (!cam.streaming && !camStatic) camSetHint("按需待机：打开预览后启动");
+  else camSetHint(null);
+
+  if (activeTab === "monitor" && !document.hidden && !camStatic) camWatchdog();
+}
+
+function camMask(ids) {
+  let mask = 0;
+  ids.forEach((id, i) => { if ($(id) && $(id).checked) mask |= (1 << i); });
+  return mask;
+}
+
+function camApplyQuickOverlay() {
+  const mask = camMask(["ov-wheels", "ov-servo", "ov-rc", "ov-sys"]);
+  send({ type: "set_cfg", overlay_mask: mask });
+  for (let i = 0; i < 4; i++) $("cam-ov" + i).checked = !!(mask & (1 << i));
+}
+
+function applyCamCfg() {
+  const mask = camMask(["cam-ov0", "cam-ov1", "cam-ov2", "cam-ov3"]);
+  send({
+    type: "set_cfg",
+    cam_policy: $("cam-policy").value,
+    cam_res: $("cam-res").value,
+    cam_quality: parseInt($("cam-quality").value, 10),
+    cam_fps_cap: parseInt($("cam-fps").value, 10),
+    overlay_mask: mask,
+  });
+  dirty.cam = false;
+  camSetHint("配置已提交，相机按需重启…");
+}
+
+async function camDownloadSnapshot() {
+  /* 相机按需启动时第一次会 503；init 约 1–2 秒，给两次退避重试。 */
+  const waits = [1200, 2200];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const r = await fetch("/cam/snapshot?t=" + Date.now(), { cache: "no-store" });
+      if (r.ok) {
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "wheel-cam-" + new Date().toISOString().replace(/[:.]/g, "-") + ".jpg";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        camSetHint(null);
+        return;
+      }
+      if (r.status === 503 && attempt < waits.length) {
+        camSetHint("相机启动中，稍后重试…");
+        await new Promise(res => setTimeout(res, waits[attempt]));
+        continue;
+      }
+      camSetHint("快照失败：HTTP " + r.status);
+      return;
+    } catch (_) {
+      camSetHint("快照请求失败");
+      return;
+    }
+  }
+}
+
+function camPollStart() {
+  if (!camStatic || activeTab !== "monitor" || document.hidden || camPollTimer) return;
+  camPollSnapshot();
+}
+
+function camPollStop() {
+  if (camPollTimer) { clearTimeout(camPollTimer); camPollTimer = null; }
+}
+
+async function camPollSnapshot() {
+  camPollTimer = null;
+  if (!camStatic || activeTab !== "monitor" || document.hidden) return;
+  try {
+    const r = await fetch("/cam/snapshot?t=" + Date.now(), { cache: "no-store" });
+    if (r.ok) {
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const img = $("cam-view");
+      img.removeAttribute("src");
+      img.src = url;
+      if (camStaticUrl) URL.revokeObjectURL(camStaticUrl);
+      camStaticUrl = url;
+      camSetHint(null);
+    } else if (r.status === 503) {
+      camSetHint("相机启动中…");
+    } else {
+      camSetHint("快照失败：HTTP " + r.status);
+    }
+  } catch (_) {
+    camSetHint("快照请求失败");
+  }
+  if (camStatic && activeTab === "monitor" && !document.hidden) {
+    /* 失败/关闭时不要 1Hz 追着重试；正常轮询 1Hz 就能喂住 30 秒宽限。 */
+    const delay = (lastCam && (lastCam.state === "fail" || lastCam.state === "off")) ? 5000 : 1000;
+    camPollTimer = setTimeout(camPollSnapshot, delay);
+  }
+}
+
+function camSetStatic(on) {
+  camStatic = !!on;
+  camStoreSet("wheelCamStatic", camStatic ? "1" : "0");
+  $("cam-static").checked = camStatic;
+  if (camStatic) {
+    camStopStream();
+    camPollStart();
+  } else {
+    camPollStop();
+    if (camStaticUrl) { URL.revokeObjectURL(camStaticUrl); camStaticUrl = null; }
+    const img = $("cam-view");
+    if (img && img.src.startsWith("blob:")) img.removeAttribute("src");
+    camSyncView();
+  }
+}
+
+function camResizeCanvas() {
+  const wrap = $("cam-wrap"), cv = $("cam-overlay");
+  if (!wrap || !cv) return;
+  const w = wrap.clientWidth || 320, h = wrap.clientHeight || 240;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(1, Math.round(w * dpr));
+  cv.height = Math.max(1, Math.round(h * dpr));
+  drawCamOverlay();
+}
+
+function camDrawBlock(ctx, lines, x, y, align, lh) {
+  if (!lines.length) return;
+  const widths = lines.map(l => ctx.measureText(l).width);
+  const w = Math.max(...widths), h = lines.length * lh;
+  const bx = align === "right" ? x - w - 6 : x - 6;
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillRect(bx, y - 4, w + 12, h + 8);
+  ctx.fillStyle = "#e8e8e8";
+  lines.forEach((line, i) => ctx.fillText(line, align === "right" ? x - w : x, y + i * lh));
+}
+
+function drawCamOverlay() {
+  const cv = $("cam-overlay");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.width / dpr, H = cv.height / dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (!lastFrame || activeTab !== "monitor") return;
+
+  const f = lastFrame;
+  const mask = (lastCam && lastCam.overlay !== undefined) ? lastCam.overlay : 15;
+  const fs = Math.max(10, Math.min(20, W * 0.022));
+  const lh = fs * 1.35;
+  const pad = Math.max(6, W * 0.012);
+  ctx.font = `${fs}px ui-monospace, Menlo, monospace`;
+  ctx.textBaseline = "top";
+
+  const collectors = f.collectors || [];
+  const wheels = collectors.find(c => c.type === "wheel_speed");
+  const servo = collectors.find(c => c.type === "servo");
+  const rc = collectors.find(c => c.type === "rc");
+
+  if ((mask & 1) && wheels) {
+    const list = wheels.wheels || [];
+    const lines = list.map((w, i) => `${wheelNames[i]} ${fmt(w.rpm, 1)} RPM`);
+    camDrawBlock(ctx, lines, pad, pad, "left", lh);
+  }
+
+  if ((mask & 2) && servo) {
+    const lines = [];
+    const scfg = servo.cfg || {};
+    (servo.servos || []).forEach((s, i) => {
+      let state;
+      if (servo.mode === "manual") {
+        const lock = (scfg.lock_us || [])[i] ?? 2000;
+        const unlock = (scfg.unlock_us || [])[i] ?? 1500;
+        state = Math.abs(s.target_us - lock) <= DETENT_TOL_US ? "锁定位"
+              : Math.abs(s.target_us - unlock) <= DETENT_TOL_US ? "解锁位" : "手动";
+      } else {
+        state = PHASE_TEXT[s.phase] || s.phase;
+      }
+      lines.push(`${servoNames[i]} ${state}${s.reached ? " ✓" : ""}`);
+      lines.push(`  指令 ${s.target_us}µs`);
+    });
+    camDrawBlock(ctx, lines, W - pad, pad, "right", lh);
+  }
+
+  if ((mask & 4) && rc) {
+    const names = ["模式", "前差", "后差"];
+    const lines = [];
+    (rc.ch || []).forEach((c, i) => {
+      const zone = (i === 0 && c.valid) ? (c.us >= 1500 ? " 手动区" : " 自动区") : "";
+      lines.push(`${names[i]} ${c.valid ? c.us + "µs" : "无信号"}${zone}`);
+    });
+    lines.push(`生效 ${rc.mode === "manual" ? "手动" : "自动"}`);
+    camDrawBlock(ctx, lines, pad, H - pad - lines.length * lh, "left", lh);
+  }
+
+  if ((mask & 8) && f.sys) {
+    const heap = (f.sys.heap_int ?? f.sys.free_heap) / 1024;
+    const lines = [`内部RAM ${fmt(heap, 0)} KB`, `运行 ${f.sys.uptime_s}s`];
+    if (lastCam) lines.push(`流 ${fmt(lastCam.fps, 1)}fps ${lastCam.bytes ?? 0}B`);
+    camDrawBlock(ctx, lines, W - pad, H - pad - lines.length * lh, "right", lh);
+  }
+}
+
 function connectWS() {
   ws = new WebSocket(WS_URL);
-  ws.onopen = () => { $("status-dot").className = "ok"; $("status-text").textContent = "已连接"; reconnect = 0; };
+  ws.onopen = () => {
+    $("status-dot").className = "ok";
+    $("status-text").textContent = "已连接";
+    reconnect = 0;
+    /* 断线重连后按当前 tab 补发预览状态，避免服务端还停在不可见计时里。 */
+    camSendPreview(activeTab === "monitor" && !document.hidden);
+  };
   ws.onmessage = e => { try { lastFrame = JSON.parse(e.data); applyFrame(lastFrame); } catch (_) {} };
   ws.onclose = () => { $("status-dot").className = "warn"; $("status-text").textContent = "断开，重连中…"; setTimeout(connectWS, Math.min(1000 * ++reconnect, 5000)); };
   ws.onerror = () => ws.close();
@@ -613,9 +1040,65 @@ window.addEventListener("DOMContentLoaded", () => {
   $("sim-apply").onclick = applySim;
   $("servo-apply").onclick = applyServoCfg;
   $("rc-apply").onclick = applyRcSim;
+  $("cam-apply").onclick = applyCamCfg;
   $("reset-counts").onclick = () => send({ type: "reset_counts" });
+  ["ov-wheels", "ov-servo", "ov-rc", "ov-sys"].forEach(id => {
+    $(id).addEventListener("change", camApplyQuickOverlay);
+  });
+  $("cam-snap").onclick = camDownloadSnapshot;
+
+  /* 静态帧模式：弱网时用快照轮询代替 MJPEG；叠加层照常刷新。 */
+  camStatic = camStoreGet("wheelCamStatic") === "1";
+  $("cam-static").checked = camStatic;
+  $("cam-static").addEventListener("change", () => camSetStatic($("cam-static").checked));
+
+  /* 装车方向不对时只翻画面，叠加层保持正向；设置存本地，不占 NVS 字段。 */
+  const flip = camStoreGet("wheelCamFlip") === "1";
+  $("cam-flip").checked = flip;
+  $("cam-view").classList.toggle("flipped", flip);
+  $("cam-flip").addEventListener("change", () => {
+    const on = $("cam-flip").checked;
+    $("cam-view").classList.toggle("flipped", on);
+    camStoreSet("wheelCamFlip", on ? "1" : "0");
+  });
+
+  $("cam-view").addEventListener("load", camResizeCanvas);
+  $("cam-view").addEventListener("error", () => {
+    if (camStatic || activeTab !== "monitor" || document.hidden) return;
+    if (camErrorTimer) return;
+    camErrorTimer = setTimeout(() => {
+      camErrorTimer = null;
+      if (camStatic || activeTab !== "monitor" || document.hidden) return;
+      if (!lastCam || lastCam.streaming) return;
+      /* 启动中和初始化失败都交给 camWatchdog 按自己的节奏处理：这里重设 src
+       * 会 abort 掉正在等 init 的流请求，第二个请求只会拿到 503 busy。 */
+      if (lastCam.state === "init" || lastCam.state === "fail") return;
+      camStartStream(true);
+    }, 2000);
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    const visible = !document.hidden;
+    camSendPreview(visible && activeTab === "monitor");
+    if (!visible) {
+      camPollStop();
+      return;
+    }
+    if (activeTab === "monitor") {
+      camResizeCanvas();
+      if (camStatic) camPollStart();
+      else camSyncView();
+    }
+  });
+  window.addEventListener("resize", camResizeCanvas);
+
   connectWS();
+  camResizeCanvas();
+  if (camStatic) camPollStart();
+  else camStartStream(false);
+
   setInterval(poll, 2000);
+  setInterval(camWatchdog, 2000);
   setInterval(() => { if (lastFrame && activeTab === "monitor") drawChart(); }, 1000);
 });
 </script>

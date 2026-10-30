@@ -33,6 +33,24 @@ typedef enum {
 
 #define TELEM_MAX_COLLECTORS 8
 
+/* sys.cam 的只读状态快照。相机不走采集器框架（30KB 级二进制帧不适合
+ * 1024B 的渲染块），但页面要显示策略、状态和实际参数，由 main 每帧喂进来。
+ * 字符串用 const char*，框架内部另存一份，调用方不必保证生命周期。 */
+typedef struct {
+    const char *policy;     /* off / on_demand / always */
+    const char *state;      /* off / idle / init / on / fail */
+    bool preview_active;    /* 预览 tab 是否可见 */
+    bool streaming;         /* 当前是否有 MJPEG 流 */
+    uint8_t clients;        /* 流客户端数（单流限制下只可能是 0/1） */
+    uint32_t stop_in_s;     /* 距离停采集还剩几秒，0 = 没有计时 */
+    const char *res;        /* qvga / vga / svga */
+    uint8_t quality;        /* JPEG quality 4..63 */
+    uint8_t fps_cap;        /* 发送帧率上限 */
+    uint32_t overlay_mask;  /* 叠加位图 */
+    float fps;              /* 实测发布帧率 */
+    uint32_t bytes;         /* 最近一帧大小 */
+} telem_cam_status_t;
+
 typedef struct {
     telem_type_t type;  /* 唯一标识，也是前端渲染分发的键 */
     esp_err_t (*init)(void *ctx);
@@ -63,6 +81,13 @@ esp_err_t telem_reset_all_baselines(void);
 
 /* 喂 sys 块原始 IO 电平（4 路 GPIO，采样任务每窗口调用）。 */
 void telem_set_gpio_levels(const uint8_t levels[4]);
+
+/* 喂 sys 块内部 RAM 余量。开 PSRAM 后 esp_get_free_heap_size() 会把外部
+ * PSRAM 算进去，页面拿它看不出内部堆压力，所以单独报这一项。 */
+void telem_set_internal_heap(uint32_t bytes);
+
+/* 喂 sys.cam 快照（ws_push_task 每帧调用，和 render 同一任务，无需加锁）。 */
+void telem_set_cam_status(const telem_cam_status_t *status);
 
 /* 宿主机测试专用：清空注册表。固件代码不得调用。 */
 void telem_reset_for_test(void);

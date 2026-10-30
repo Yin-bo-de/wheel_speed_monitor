@@ -1,0 +1,5 @@
+## 摄像头驱动由组件管理器拉取；钉版本避免上游 API 漂移。
+## 首次构建需要联网，组件会落在项目根 managed_components/（已 gitignore）。
+dependencies:
+  idf: ">=5.1"
+  espressif/esp32-camera: "2.1.8"

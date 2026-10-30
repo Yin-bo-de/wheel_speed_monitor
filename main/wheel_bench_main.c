@@ -15,13 +15,16 @@
  * 自动模式忽略遥控、仍走轮速状态机。信号无效时回落设置页配置。
  *
  * 任务表（优先/栈/核心见 wheel_config.h；固化进项目 CLAUDE.md）：
- *   sampler_task  Core0 22 3072  50ms 采样 + 舵机控制链
- *   ws_push_task  Core0 15 8192  100ms 推遥测帧
- *   httpd server  Core1  5 8192  事件驱动
+ *   sampler_task     Core0 22 3072  50ms 采样 + 舵机控制链
+ *   ws_push_task     Core0 15 8192  100ms 推遥测帧
+ *   httpd server     Core1  5 8192  事件驱动
+ *   cam_publish_task Core1  6 6144  相机 init/deinit/取帧/预览计时
+ *   cam_stream_task  Core1  5 4096  /cam/stream 的 MJPEG 发送
  */
 #include <string.h>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_types.h"
@@ -30,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "bench_cam.h"
 #include "bench_http_server.h"
 #include "config_store.h"
 #include "rc_capture.h"
@@ -430,7 +434,8 @@ static void ws_push_task(void *arg)
 {
     (void)arg;
     TickType_t last = xTaskGetTickCount();
-    char frame[2048];
+    /* 3072：轮速/舵机/遥控三块加上 sys.cam 后，2048 已接近上限 */
+    char frame[3072];
     uint32_t seq = 0;
 
     while (1) {
@@ -462,6 +467,12 @@ static void ws_push_task(void *arg)
             w->pulses = u->chan.pulses_total;
             w->trigger = u->chan.trigger;
         }
+
+        /* sys.cam 与内部 RAM 余量都是运行时快照，和 render 在同一任务里喂。 */
+        telem_cam_status_t cam_st;
+        bench_cam_get_status(&cam_st);
+        telem_set_cam_status(&cam_st);
+        telem_set_internal_heap((uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
         size_t used = 0;
         esp_err_t e = telem_render_frame(frame, sizeof(frame), &used, seq, now_ms,
@@ -532,6 +543,10 @@ void app_main(void)
              cfg.rc_sim, (unsigned long)cfg.rc_sim_us[0], (unsigned long)cfg.rc_sim_us[1],
              (unsigned long)cfg.rc_sim_us[2], WHEEL_RC_TIMEOUT_MS,
              WHEEL_RC_GPIO_MODE, WHEEL_RC_GPIO_DIFF_FRONT, WHEEL_RC_GPIO_DIFF_REAR);
+    ESP_LOGI(TAG, "cam: policy=%lu res=%lu quality=%lu fps_cap=%lu overlay=0x%lx",
+             (unsigned long)cfg.cam_policy, (unsigned long)cfg.cam_res,
+             (unsigned long)cfg.cam_quality, (unsigned long)cfg.cam_fps_cap,
+             (unsigned long)cfg.overlay_mask);
 
     /* collector 配置快照 */
     s_chan_cfg.window_ms = WHEEL_SAMPLE_MS;
@@ -566,6 +581,9 @@ void app_main(void)
     ESP_LOGI(TAG, "rc collector register: %d", e);
 
     wifi_ap_start();
+
+    /* 相机服务先于 httpd 起来：httpd 一开就可能收到 /cam/stream。 */
+    ESP_ERROR_CHECK(bench_cam_start(&s_cfg, s_cfg_mutex));
 
     bench_server_ctx_t ctx = {
         .cfg = &s_cfg,

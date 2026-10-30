@@ -172,6 +172,60 @@ static void test_registry_full(void)
     TEST_ASSERT_TRUE(got_full_error);
 }
 
+/* 8. sys 块带内部 RAM 余量与 sys.cam 状态；字段值与布尔/浮点格式正确 */
+static void test_render_sys_cam_and_heap_int(void)
+{
+    telem_reset_for_test();
+    telem_set_internal_heap(96000);
+    telem_cam_status_t cam = {
+        .policy = "on_demand",
+        .state = "on",
+        .preview_active = false,
+        .streaming = true,
+        .clients = 1,
+        .stop_in_s = 18,
+        .res = "qvga",
+        .quality = 12,
+        .fps_cap = 15,
+        .overlay_mask = 0x0F,
+        .fps = 14.8f,
+        .bytes = 8213,
+    };
+    telem_set_cam_status(&cam);
+
+    char buf[1024];
+    size_t used = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, telem_render_frame(buf, sizeof(buf), &used, 7, 123456, 300000));
+    assert_contains(buf, "\"heap_int\":96000");
+    assert_contains(buf, "\"cam\":{");
+    assert_contains(buf, "\"policy\":\"on_demand\"");
+    assert_contains(buf, "\"state\":\"on\"");
+    assert_contains(buf, "\"preview\":\"inactive\"");
+    assert_contains(buf, "\"streaming\":true");
+    assert_contains(buf, "\"clients\":1");
+    assert_contains(buf, "\"stop_in_s\":18");
+    assert_contains(buf, "\"res\":\"qvga\"");
+    assert_contains(buf, "\"quality\":12");
+    assert_contains(buf, "\"fps_cap\":15");
+    assert_contains(buf, "\"overlay\":15");
+    assert_contains(buf, "\"fps\":14.8");
+    assert_contains(buf, "\"bytes\":8213");
+    /* sys 对象在 cam 之后正常闭合，collectors 仍是同级字段 */
+    assert_contains(buf, "\"collectors\":[");
+}
+
+/* 9. 未喂相机状态时 sys.cam 仍然存在且是合法空值，不输出悬空字符串 */
+static void test_render_sys_cam_defaults(void)
+{
+    telem_reset_for_test();
+    char buf[1024];
+    size_t used = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, telem_render_frame(buf, sizeof(buf), &used, 0, 0, 0));
+    assert_contains(buf, "\"cam\":{\"policy\":\"\",\"state\":\"\"");
+    assert_contains(buf, "\"preview\":\"inactive\"");
+    assert_contains(buf, "\"streaming\":false");
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_register_then_sample_all, "test_register_then_sample_all", __LINE__);
     UnityDefaultTestRun(test_three_collectors_aggregate, "test_three_collectors_aggregate", __LINE__);
@@ -180,4 +234,6 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_duplicate_type_rejected, "test_duplicate_type_rejected", __LINE__);
     UnityDefaultTestRun(test_sample_error_isolated, "test_sample_error_isolated", __LINE__);
     UnityDefaultTestRun(test_registry_full, "test_registry_full", __LINE__);
+    UnityDefaultTestRun(test_render_sys_cam_and_heap_int, "test_render_sys_cam_and_heap_int", __LINE__);
+    UnityDefaultTestRun(test_render_sys_cam_defaults, "test_render_sys_cam_defaults", __LINE__);
 )

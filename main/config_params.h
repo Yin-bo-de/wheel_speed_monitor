@@ -5,7 +5,8 @@
  *
  * blob 版本迁移：v1（32B）是一期的布局；v2（72B）在尾部追加舵机与锁定策略
  * 参数；v3（76B）把舵机脉宽从"共享的 min/center/max + invert"换成"每通道的
- * 解锁/锁定两档"；v4（84B）在尾部追加遥控输入（模拟开关与三路模拟脉宽）。
+ * 解锁/锁定两档"；v4（84B）在尾部追加遥控输入（模拟开关与三路模拟脉宽）；
+ * v5（92B）在尾部追加摄像头策略、分辨率、画质、发送帧率上限与叠加位图。
  * 解包按首字节版本号分派——旧 blob 仍可解，缺失字段取默认值（v2 还要按旧
  * 语义换算，见 cfg_params_unpack），上层解出后回写最新版，升级不丢用户已设的配置。
  */
@@ -50,6 +51,28 @@ extern "C" {
 #define CFG_SIM_SPEED_MIN 100
 #define CFG_SIM_SPEED_MAX 20000
 
+/* 摄像头策略：off 永不初始化；on_demand 由第一个流/快照请求启动；always 调试常开。 */
+#define CFG_CAM_POLICY_OFF 0
+#define CFG_CAM_POLICY_ON_DEMAND 1
+#define CFG_CAM_POLICY_ALWAYS 2
+
+#define CFG_CAM_RES_QVGA 0
+#define CFG_CAM_RES_VGA 1
+#define CFG_CAM_RES_SVGA 2
+
+#define CFG_CAM_QUALITY_MIN 4
+#define CFG_CAM_QUALITY_MAX 63
+#define CFG_CAM_FPS_MIN 5
+#define CFG_CAM_FPS_MAX 25
+
+/* 叠加位图：低 4 位有定义，其余位一律拒绝，避免"页面以为开了、固件不认识"。 */
+#define CFG_CAM_OVERLAY_WHEELS (1u << 0)
+#define CFG_CAM_OVERLAY_SERVO (1u << 1)
+#define CFG_CAM_OVERLAY_RC (1u << 2)
+#define CFG_CAM_OVERLAY_SYS (1u << 3)
+#define CFG_CAM_OVERLAY_ALL (CFG_CAM_OVERLAY_WHEELS | CFG_CAM_OVERLAY_SERVO | \
+                             CFG_CAM_OVERLAY_RC | CFG_CAM_OVERLAY_SYS)
+
 /* blob 定长布局（尾部补零）：
  *   v1 段 0..31：版本(1B) + magnets(1B) + diam(4B) + alpha(4B float)
  *               + wheel_enabled(1B 位图) + sim_on(1B) + sim_rpm[4](16B) + debounce_ms(4B)
@@ -58,16 +81,20 @@ extern "C" {
  *               + engage/min_rpm(float×2) + lock_hold/max/probe(u32×3)
  *               + sim_speed(u32) + 保留(5B)
  *   v4 段 76..83：rc_sim(1B) + rc_sim_us(u16×3) + 保留(1B)
+ *   v5 段 84..91：cam_policy(1B) + cam_res(1B) + cam_quality(1B)
+ *               + cam_fps_cap(1B) + overlay_mask(u32)
  * v2 段（32..71）与 v3 段是同义不同形：v2 用共享的 min/center/max + invert
  * 位图描述脉宽，v3 换成每通道两档，因此长 4 字节、其余字段偏移整体后移。 */
-#define CFG_PARAMS_BLOB_VERSION 4
-#define CFG_PARAMS_BLOB_SIZE 84
+#define CFG_PARAMS_BLOB_VERSION 5
+#define CFG_PARAMS_BLOB_SIZE 92
 #define CFG_PARAMS_BLOB_VERSION_1 1
 #define CFG_PARAMS_BLOB_SIZE_V1 32
 #define CFG_PARAMS_BLOB_VERSION_2 2
 #define CFG_PARAMS_BLOB_SIZE_V2 72
 #define CFG_PARAMS_BLOB_VERSION_3 3
 #define CFG_PARAMS_BLOB_SIZE_V3 76
+#define CFG_PARAMS_BLOB_VERSION_4 4
+#define CFG_PARAMS_BLOB_SIZE_V4 84
 
 typedef struct {
     uint32_t magnets;    /* 每转磁铁数 1-16 */
@@ -102,6 +129,13 @@ typedef struct {
     /* 三路模拟脉宽，顺序同 rc_input：模式 / 前差速 / 后差速。
      * 模式通道默认落在自动区（1000），打开模拟不会平白把模式翻成手动。 */
     uint32_t rc_sim_us[CFG_RC_CH_COUNT];
+
+    /* ---- v5：摄像头 ---- */
+    uint32_t cam_policy;    /* CFG_CAM_POLICY_*，默认 on_demand */
+    uint32_t cam_res;       /* CFG_CAM_RES_*，默认 QVGA */
+    uint32_t cam_quality;   /* JPEG quality 4..63，值小画质高 */
+    uint32_t cam_fps_cap;   /* 发送帧率上限 5..25，不影响传感器采集 */
+    uint32_t overlay_mask;  /* CFG_CAM_OVERLAY_* 位图 */
 } cfg_params_t;
 
 void cfg_params_default(cfg_params_t *cfg);

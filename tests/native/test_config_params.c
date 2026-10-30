@@ -376,7 +376,7 @@ static void test_unpack_rejects_bad_len_and_version(void)
 
     blob[0] = 0;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
-    blob[0] = 5; /* 比当前版本更新 → 认不出来，拒绝 */
+    blob[0] = 6; /* 比当前版本更新 → 认不出来，拒绝 */
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
 
     /* v1 版本号但只有 31 字节：残缺，拒绝 */
@@ -394,6 +394,16 @@ static void test_unpack_rejects_bad_len_and_version(void)
     blob[0] = 3;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 75, &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 76, &cfg));
+
+    /* v4：83 字节残缺拒绝，84 字节照收（摄像头字段随后取默认） */
+    blob[0] = 4;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 83, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 84, &cfg));
+
+    /* v5：91 字节残缺拒绝，92 字节照收 */
+    blob[0] = 5;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 91, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 92, &cfg));
 
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(NULL, sizeof(blob), &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, sizeof(blob), NULL));
@@ -519,6 +529,147 @@ static void test_pack_unpack_v4_roundtrip(void)
     TEST_ASSERT_EQUAL_INT(4500, b.lock_hold_ms);
 }
 
+/* 18. 摄像头默认值：按需启动、QVGA、quality 12、15fps、叠加全开 */
+static void test_cam_defaults(void)
+{
+    cfg_params_t cfg;
+    cfg_params_default(&cfg);
+    TEST_ASSERT_EQUAL_INT(CFG_CAM_POLICY_ON_DEMAND, cfg.cam_policy);
+    TEST_ASSERT_EQUAL_INT(CFG_CAM_RES_QVGA, cfg.cam_res);
+    TEST_ASSERT_EQUAL_INT(12, cfg.cam_quality);
+    TEST_ASSERT_EQUAL_INT(15, cfg.cam_fps_cap);
+    TEST_ASSERT_EQUAL_INT(CFG_CAM_OVERLAY_ALL, cfg.overlay_mask);
+}
+
+/* 19. 摄像头字段边界：策略/分辨率枚举、画质与帧率范围、叠加位图未知位 */
+static void test_cam_bounds(void)
+{
+    cfg_params_t cfg;
+    cfg_params_default(&cfg);
+
+    for (uint32_t p = 0; p <= CFG_CAM_POLICY_ALWAYS; p++) {
+        cfg.cam_policy = p;
+        TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "cam_policy"));
+    }
+    cfg.cam_policy = CFG_CAM_POLICY_ALWAYS + 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "cam_policy"));
+
+    for (uint32_t r = 0; r <= CFG_CAM_RES_SVGA; r++) {
+        cfg.cam_res = r;
+        TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "cam_res"));
+    }
+    cfg.cam_res = CFG_CAM_RES_SVGA + 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "cam_res"));
+
+    cfg.cam_quality = CFG_CAM_QUALITY_MIN;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "cam_quality"));
+    cfg.cam_quality = CFG_CAM_QUALITY_MAX;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "cam_quality"));
+    cfg.cam_quality = CFG_CAM_QUALITY_MIN - 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "cam_quality"));
+    cfg.cam_quality = CFG_CAM_QUALITY_MAX + 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "cam_quality"));
+
+    cfg.cam_fps_cap = CFG_CAM_FPS_MIN;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "cam_fps_cap"));
+    cfg.cam_fps_cap = CFG_CAM_FPS_MAX;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "cam_fps_cap"));
+    cfg.cam_fps_cap = CFG_CAM_FPS_MIN - 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "cam_fps_cap"));
+    cfg.cam_fps_cap = CFG_CAM_FPS_MAX + 1;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "cam_fps_cap"));
+
+    cfg.overlay_mask = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "overlay_mask"));
+    cfg.overlay_mask = CFG_CAM_OVERLAY_ALL;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "overlay_mask"));
+    cfg.overlay_mask = 1u << 4; /* 未定义的第五位 */
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "overlay_mask"));
+    cfg.overlay_mask = 0x80000000u;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "overlay_mask"));
+}
+
+/* 20. v5 往返：摄像头字段与前面各段全部保真，新段不挤旧偏移 */
+static void test_pack_unpack_v5_roundtrip(void)
+{
+    cfg_params_t a, b;
+    cfg_params_default(&a);
+    a.cam_policy = CFG_CAM_POLICY_ALWAYS;
+    a.cam_res = CFG_CAM_RES_SVGA;
+    a.cam_quality = 7;
+    a.cam_fps_cap = 22;
+    a.overlay_mask = CFG_CAM_OVERLAY_WHEELS | CFG_CAM_OVERLAY_SYS;
+    a.rc_sim = true;
+    a.rc_sim_us[2] = 2100;
+    a.servo_lock_us[1] = 900;
+
+    uint8_t blob[CFG_PARAMS_BLOB_SIZE];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_pack(&a, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL_INT(CFG_PARAMS_BLOB_VERSION, blob[0]);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, sizeof(blob), &b));
+
+    TEST_ASSERT_EQUAL_INT(a.cam_policy, b.cam_policy);
+    TEST_ASSERT_EQUAL_INT(a.cam_res, b.cam_res);
+    TEST_ASSERT_EQUAL_INT(a.cam_quality, b.cam_quality);
+    TEST_ASSERT_EQUAL_INT(a.cam_fps_cap, b.cam_fps_cap);
+    TEST_ASSERT_EQUAL_INT(a.overlay_mask, b.overlay_mask);
+    TEST_ASSERT_TRUE(b.rc_sim);
+    TEST_ASSERT_EQUAL_INT(2100, b.rc_sim_us[2]);
+    TEST_ASSERT_EQUAL_INT(900, b.servo_lock_us[1]);
+}
+
+/* 按四期（v4）布局手工拼一条 84 字节 blob：遥控段照旧，尾部没有摄像头段。
+ * 同样不复用打包代码，模拟旧固件写下的真实字节流。 */
+static void build_v4_blob(uint8_t buf[84])
+{
+    memset(buf, 0, 84);
+    buf[0] = 4;     /* v4 版本号 */
+    buf[32] = 1;    /* servo_sim */
+    buf[33] = 0x03; /* 两轴使能 */
+    buf[34] = CFG_SERVO_MODE_AUTO;
+    uint16_t unlock[2] = {1500, 1500};
+    uint16_t lock[2] = {2000, 2000};
+    uint16_t manual[2] = {1500, 1500};
+    memcpy(buf + 35, unlock, 4);
+    memcpy(buf + 39, lock, 4);
+    memcpy(buf + 43, manual, 4);
+    float engage = 0.30f, min_rpm = 10.0f;
+    memcpy(buf + 47, &engage, 4);
+    memcpy(buf + 51, &min_rpm, 4);
+    uint32_t hold = 3000, hold_max = 30000, probe = 2000, speed = 3000;
+    memcpy(buf + 55, &hold, 4);
+    memcpy(buf + 59, &hold_max, 4);
+    memcpy(buf + 63, &probe, 4);
+    memcpy(buf + 67, &speed, 4);
+    buf[76] = 1; /* rc_sim */
+    uint16_t sim[3] = {1000, 1600, 1400};
+    memcpy(buf + 77, sim, 6);
+}
+
+/* 21. v4 blob 迁移：旧字段原样解出，摄像头字段取默认（按需、QVGA、12、15、全开） */
+static void test_v4_blob_migrates_to_camera_defaults(void)
+{
+    uint8_t v4[84];
+    build_v4_blob(v4);
+
+    cfg_params_t cfg;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(v4, sizeof(v4), &cfg));
+
+    TEST_ASSERT_TRUE(cfg.rc_sim);
+    TEST_ASSERT_EQUAL_INT(1000, cfg.rc_sim_us[0]);
+    TEST_ASSERT_EQUAL_INT(1600, cfg.rc_sim_us[1]);
+    TEST_ASSERT_EQUAL_INT(1400, cfg.rc_sim_us[2]);
+    TEST_ASSERT_EQUAL_INT(2000, cfg.servo_lock_us[0]);
+
+    cfg_params_t def;
+    cfg_params_default(&def);
+    TEST_ASSERT_EQUAL_INT(def.cam_policy, cfg.cam_policy);
+    TEST_ASSERT_EQUAL_INT(def.cam_res, cfg.cam_res);
+    TEST_ASSERT_EQUAL_INT(def.cam_quality, cfg.cam_quality);
+    TEST_ASSERT_EQUAL_INT(def.cam_fps_cap, cfg.cam_fps_cap);
+    TEST_ASSERT_EQUAL_INT(def.overlay_mask, cfg.overlay_mask);
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_defaults, "test_defaults", __LINE__);
     UnityDefaultTestRun(test_bounds, "test_bounds", __LINE__);
@@ -535,6 +686,10 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_rc_defaults, "test_rc_defaults", __LINE__);
     UnityDefaultTestRun(test_rc_sim_us_bounds, "test_rc_sim_us_bounds", __LINE__);
     UnityDefaultTestRun(test_pack_unpack_v4_roundtrip, "test_pack_unpack_v4_roundtrip", __LINE__);
+    UnityDefaultTestRun(test_cam_defaults, "test_cam_defaults", __LINE__);
+    UnityDefaultTestRun(test_cam_bounds, "test_cam_bounds", __LINE__);
+    UnityDefaultTestRun(test_pack_unpack_v5_roundtrip, "test_pack_unpack_v5_roundtrip", __LINE__);
+    UnityDefaultTestRun(test_v4_blob_migrates_to_camera_defaults, "test_v4_blob_migrates_to_camera_defaults", __LINE__);
     UnityDefaultTestRun(test_unpack_rejects_bad_len_and_version, "test_unpack_rejects_bad_len_and_version", __LINE__);
     UnityDefaultTestRun(test_pack_guards, "test_pack_guards", __LINE__);
 )
