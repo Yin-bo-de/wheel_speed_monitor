@@ -5,6 +5,7 @@
 #include "camera_drv.h"
 #include "esp_camera.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "sensor.h"
 
 #if CONFIG_IDF_TARGET_ESP32S3
@@ -65,6 +66,24 @@ static uint8_t s_base_clkrc;
 static uint8_t s_cur_clkrc;
 static uint16_t s_base_vts;
 static uint16_t s_cur_vts;
+
+/* OV5640 停掉 XCLK 后仍保持常电偏置，模组会继续发热。deinit 前让它
+ * 进入软件掉电（SYSTEM_CTROL0 bit6）；下次 esp_camera_init() 会写
+ * 0x3008=0x82 清除掉电位，采集能正常恢复。 */
+static void camera_sensor_standby(void)
+{
+    if (s_sensor == NULL || s_sensor->set_reg == NULL ||
+        s_sensor->id.PID != OV5640_PID) {
+        return;
+    }
+    int ret = s_sensor->set_reg(s_sensor, 0x3008, 0xFF, 0x42);
+    if (ret == 0) {
+        ESP_LOGI(TAG, "sensor standby");
+        esp_rom_delay_us(5000);
+    } else {
+        ESP_LOGW(TAG, "sensor standby failed: %d", ret);
+    }
+}
 
 static framesize_t res_to_framesize(uint32_t res)
 {
@@ -247,6 +266,8 @@ esp_err_t camera_drv_deinit(void)
     if (!s_inited) {
         return ESP_OK;
     }
+    /* 趁 SCCB 还活着、XCLK 还在，先让传感器进 standby。 */
+    camera_sensor_standby();
     esp_err_t e = esp_camera_deinit();
     /* esp_camera_deinit() 不关 S3 的 XCLK，必须在它之后主动收尾。 */
     camera_xclk_disable();
