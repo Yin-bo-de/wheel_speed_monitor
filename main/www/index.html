@@ -67,13 +67,38 @@
     border-radius:6px; min-height:240px; overflow:hidden; }
   .cam-wrap img { display:block; width:100%; max-height:58vh; object-fit:contain; background:#000; }
   .cam-wrap img.flipped { transform:scale(-1,-1); }
-  .cam-wrap canvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
-  .cam-hint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  .cam-wrap canvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:1; }
+  .cam-hint { position:absolute; inset:0; z-index:2; display:flex; align-items:center; justify-content:center;
     text-align:center; padding:12px; color:#aaa; font-size:13px; background:rgba(0,0,0,0.35); }
   .cam-tools { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin-top:8px; font-size:12px; }
   .cam-tools label { display:flex; align-items:center; gap:4px; }
   .cam-tools .spacer { flex:1 1 auto; }
   .cam-status { font-variant-numeric:tabular-nums; }
+  /* 全屏时用容器本身作为全屏元素，视频和 canvas 叠加层一起进去。
+     退出按钮放在容器内部，避免全屏后外面的工具栏不可见。 */
+  .cam-fs-exit { display:none; position:absolute; top:10px; right:10px; z-index:3;
+    background:rgba(0,0,0,0.65); border-color:#666; }
+  /* 分开写：Firefox 不认 :-webkit-full-screen，合并选择器会让整条规则失效。 */
+  .cam-wrap:fullscreen {
+    width:100vw; height:100vh; height:100dvh; min-height:0; border:0; border-radius:0;
+    background:#000;
+  }
+  .cam-wrap:-webkit-full-screen {
+    width:100vw; height:100vh; height:100dvh; min-height:0; border:0; border-radius:0;
+    background:#000;
+  }
+  .cam-wrap:fullscreen img { width:100%; height:100%; max-height:none; object-fit:contain; }
+  .cam-wrap:-webkit-full-screen img { width:100%; height:100%; max-height:none; object-fit:contain; }
+  .cam-wrap:fullscreen .cam-fs-exit { display:block; }
+  .cam-wrap:-webkit-full-screen .cam-fs-exit { display:block; }
+  /* 不支持元素全屏 API 的浏览器（部分 iOS）退化到固定定位铺满视口。 */
+  .cam-wrap.pseudo-fullscreen {
+    position:fixed; inset:0; z-index:9999; width:100vw; height:100vh; height:100dvh;
+    min-height:0; border:0; border-radius:0; background:#000;
+  }
+  .cam-wrap.pseudo-fullscreen img { width:100%; height:100%; max-height:none; object-fit:contain; }
+  .cam-wrap.pseudo-fullscreen .cam-fs-exit { display:block; }
+  body.cam-fs-lock { overflow:hidden; }
   /* 切到设置 tab 时不把预览卡移出渲染树（display:none 会让浏览器停读 MJPEG），
      只把它移出布局并设为全透明；30 秒保持靠这条规则活着。 */
   section.tab-passive { position:absolute; top:0; left:0; width:100%; opacity:0;
@@ -106,6 +131,7 @@
       <img id="cam-view" alt="摄像头画面">
       <canvas id="cam-overlay"></canvas>
       <div class="cam-hint" id="cam-hint">打开预览后按需启动相机</div>
+      <button id="cam-fs-exit" class="cam-fs-exit" type="button">退出全屏</button>
     </div>
     <div class="cam-tools">
       <label><input type="checkbox" id="ov-wheels" checked> 轮速</label>
@@ -115,6 +141,7 @@
       <label><input type="checkbox" id="cam-static"> 静态帧模式</label>
       <label><input type="checkbox" id="cam-flip"> 画面翻转</label>
       <span class="spacer"></span>
+      <button id="cam-full" type="button">全屏</button>
       <button id="cam-snap">原始快照 ⤓</button>
     </div>
     <p class="hint">按需采集：打开本页预览才启动相机；切到设置页后流和采集保持 30 秒，
@@ -409,6 +436,7 @@ function buildPanels() {
 
 function showTab(name) {
   const prev = activeTab;
+  if (name !== "monitor" && camIsFullscreen()) camExitFullscreen();
   activeTab = name;
   document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   /* 监测页不能设 hidden（display:none 会让浏览器停读 MJPEG）：切走时只把它
@@ -960,6 +988,80 @@ function drawCamOverlay() {
   }
 }
 
+/* ---- 画面全屏 ---- */
+
+function camFullscreenElement() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+
+function camIsFullscreen() {
+  const wrap = $("cam-wrap");
+  return wrap && (camFullscreenElement() === wrap ||
+                  wrap.classList.contains("pseudo-fullscreen"));
+}
+
+function camPseudoFullscreen(on) {
+  const wrap = $("cam-wrap");
+  if (!wrap) return;
+  wrap.classList.toggle("pseudo-fullscreen", on);
+  document.body.classList.toggle("cam-fs-lock", on);
+  const btn = $("cam-full");
+  if (btn) btn.textContent = on ? "退出全屏" : "全屏";
+  requestAnimationFrame(camResizeCanvas);
+}
+
+function camUpdateFullscreenLabel() {
+  const btn = $("cam-full");
+  if (btn) btn.textContent = camIsFullscreen() ? "退出全屏" : "全屏";
+  /* 全屏切换后容器尺寸要下一帧才稳定，再画一次 overlay。 */
+  requestAnimationFrame(camResizeCanvas);
+  setTimeout(camResizeCanvas, 80);
+}
+
+function camExitFullscreen() {
+  const wrap = $("cam-wrap");
+  if (wrap && wrap.classList.contains("pseudo-fullscreen")) {
+    camPseudoFullscreen(false);
+  }
+  /* 同时收掉原生全屏：极少数浏览器可能先走了兜底又被原生全屏接管。 */
+  if (document.fullscreenElement && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {});
+  } else if (document.webkitFullscreenElement && document.webkitExitFullscreen) {
+    document.webkitExitFullscreen();
+  }
+}
+
+function camToggleFullscreen() {
+  const wrap = $("cam-wrap");
+  if (!wrap) return;
+  if (camIsFullscreen()) {
+    camExitFullscreen();
+    return;
+  }
+
+  const request = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+  if (!request) {
+    /* 部分 iOS 只允许 video 全屏；直接用固定定位铺满视口兜底。 */
+    camPseudoFullscreen(true);
+    return;
+  }
+
+  try {
+    const p = request.call(wrap);
+    if (p && typeof p.catch === "function") {
+      p.catch(() => camPseudoFullscreen(true));
+    }
+    /* 老 WebKit 不返回 Promise，而且元素全屏可能静默失败；等一拍再确认，
+     * 没进全屏就退回固定铺满。 */
+    setTimeout(() => {
+      camUpdateFullscreenLabel();
+      if (!camIsFullscreen()) camPseudoFullscreen(true);
+    }, 400);
+  } catch (_) {
+    camPseudoFullscreen(true);
+  }
+}
+
 function connectWS() {
   ws = new WebSocket(WS_URL);
   ws.onopen = () => {
@@ -1050,6 +1152,16 @@ window.addEventListener("DOMContentLoaded", () => {
     $(id).addEventListener("change", camApplyQuickOverlay);
   });
   $("cam-snap").onclick = camDownloadSnapshot;
+  $("cam-full").onclick = camToggleFullscreen;
+  $("cam-fs-exit").onclick = camExitFullscreen;
+  document.addEventListener("fullscreenchange", camUpdateFullscreenLabel);
+  document.addEventListener("webkitfullscreenchange", camUpdateFullscreenLabel);
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && $("cam-wrap").classList.contains("pseudo-fullscreen")) {
+      e.preventDefault();
+      camExitFullscreen();
+    }
+  });
 
   /* 静态帧模式：弱网时用快照轮询代替 MJPEG；叠加层照常刷新。 */
   camStatic = camStoreGet("wheelCamStatic") === "1";
