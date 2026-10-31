@@ -7,6 +7,13 @@
 #include "esp_log.h"
 #include "sensor.h"
 
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "driver/gpio.h"
+#include "esp_rom_gpio.h"
+#include "soc/gpio_sig_map.h"
+#include "soc/lcd_cam_struct.h"
+#endif
+
 static const char *TAG = "camera_drv";
 
 /* Freenove ESP32-S3 WROOM CAM（FNK0085）板载 DVP 接线，按本地例程
@@ -28,6 +35,22 @@ static const char *TAG = "camera_drv";
 #define CAM_PIN_D7 16
 
 #define CAM_XCLK_HZ 20000000
+
+/* S3 的 XCLK 由 LCD_CAM 产生，esp_camera_deinit() 只停采集和 DMA，
+ * 不会关时钟源。模组 PWDN 固定为 -1，若时钟继续输出，停采后传感器
+ * 仍会持续成像/压缩并发热。这里显式关闭时钟源并把引脚拉低。 */
+static void camera_xclk_disable(void)
+{
+#if CONFIG_IDF_TARGET_ESP32S3
+    LCD_CAM.cam_ctrl.cam_clk_sel = 0; /* 0 = clock source disabled */
+    LCD_CAM.cam_ctrl.cam_update = 1;
+
+    esp_rom_gpio_connect_out_signal(CAM_PIN_XCLK, SIG_GPIO_OUT_IDX, false, false);
+    gpio_set_direction(CAM_PIN_XCLK, GPIO_MODE_OUTPUT);
+    gpio_set_level(CAM_PIN_XCLK, 0);
+    ESP_LOGI(TAG, "xclk off");
+#endif
+}
 
 static bool s_inited;
 static char s_sensor_name[16] = "unknown";
@@ -170,6 +193,8 @@ esp_err_t camera_drv_init(const camera_drv_cfg_t *cfg)
 
     esp_err_t e = esp_camera_init(&config);
     if (e != ESP_OK) {
+        /* 初始化可能已经打开过 XCLK，失败返回前也要收尾。 */
+        camera_xclk_disable();
         ESP_LOGE(TAG, "esp_camera_init failed: %d（检查 PSRAM 与排线）", e);
         return e;
     }
@@ -178,6 +203,7 @@ esp_err_t camera_drv_init(const camera_drv_cfg_t *cfg)
     if (sensor == NULL) {
         ESP_LOGE(TAG, "esp_camera_sensor_get returned NULL");
         (void)esp_camera_deinit();
+        camera_xclk_disable();
         return ESP_FAIL;
     }
 
@@ -222,6 +248,8 @@ esp_err_t camera_drv_deinit(void)
         return ESP_OK;
     }
     esp_err_t e = esp_camera_deinit();
+    /* esp_camera_deinit() 不关 S3 的 XCLK，必须在它之后主动收尾。 */
+    camera_xclk_disable();
     s_inited = false;
     s_sensor = NULL;
     s_fps_supported = false;
