@@ -32,6 +32,7 @@ typedef struct {
     char res[8];
     uint8_t quality;
     uint8_t fps_cap;
+    uint8_t fps_eff;
     uint32_t overlay_mask;
     float fps;
     uint32_t bytes;
@@ -122,13 +123,15 @@ esp_err_t telem_render_frame(char *buf, size_t len, size_t *used,
 
     TELEM_SNPRINTF("\"cam\":{\"policy\":\"%s\",\"state\":\"%s\",\"preview\":\"%s\","
                    "\"streaming\":%s,\"clients\":%u,\"stop_in_s\":%lu,"
-                   "\"res\":\"%s\",\"quality\":%u,\"fps_cap\":%u,\"overlay\":%lu,"
+                   "\"res\":\"%s\",\"quality\":%u,\"fps_cap\":%u,"
+                   "\"fps_eff\":%u,\"overlay\":%lu,"
                    "\"fps\":%.1f,\"bytes\":%lu}},",
                    g_cam.policy, g_cam.state,
                    g_cam.preview_active ? "active" : "inactive",
                    g_cam.streaming ? "true" : "false", (unsigned)g_cam.clients,
                    (unsigned long)g_cam.stop_in_s, g_cam.res,
                    (unsigned)g_cam.quality, (unsigned)g_cam.fps_cap,
+                   (unsigned)g_cam.fps_eff,
                    (unsigned long)g_cam.overlay_mask, (double)g_cam.fps,
                    (unsigned long)g_cam.bytes);
 
@@ -207,6 +210,7 @@ void telem_set_cam_status(const telem_cam_status_t *status)
     copy_str(g_cam.res, sizeof(g_cam.res), status->res);
     g_cam.quality = status->quality;
     g_cam.fps_cap = status->fps_cap;
+    g_cam.fps_eff = status->fps_eff;
     g_cam.overlay_mask = status->overlay_mask;
     g_cam.fps = status->fps;
     g_cam.bytes = status->bytes;

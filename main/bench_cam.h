@@ -58,6 +58,10 @@ void bench_cam_stream_release(void);
 /* 流任务每帧前查询：策略关闭、预览超时、改参数重 init、相机失败时返回 true。 */
 bool bench_cam_stream_should_stop(void);
 
+/* 流任务上报一帧的实际发送耗时；控制器据此自动降/升采集帧率。
+ * 只在流活跃时有意义，流结束会自动回到用户配置上限。 */
+void bench_cam_report_send_time(uint32_t send_ms);
+
 /* 把最新发布帧拷到调用方缓冲。没有帧或缓冲不足返回错误，不阻塞。 */
 esp_err_t bench_cam_copy_latest(uint8_t *dst, size_t cap, size_t *len, uint32_t *gen);
 /* 当前分辨率下 JPEG 缓冲上限，流任务按它分配发送缓冲。 */

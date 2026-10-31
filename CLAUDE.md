@@ -54,7 +54,7 @@ ctest --test-dir tests/native/build --output-on-failure
 | ws_push_task | Core0 | 15 | 8192 | 100ms 推送遥测帧（单任务 WS 发送） |
 | httpd server | Core1 |  5 | 8192 | 静态页/API/WS 命令解析；不跑 MJPEG 循环 |
 | cam_publish_task | Core1 | 6 | 6144 | 相机 init/deinit/取帧/发布缓冲/预览计时；唯一碰相机句柄的任务 |
-| cam_stream_task | Core1 | 5 | 4096 | 接管 `/cam/stream` 异步请求，按帧率上限发 MJPEG |
+| cam_stream_task | Core1 | 5 | 4096 | 接管 `/cam/stream` 异步请求，按网络自适应后的有效帧率发 MJPEG |
 | esp32-camera 内部任务 | Core1 | 23（库固定） | 4096 | DMA 取帧；必须由 `CONFIG_CAMERA_CORE1=y` 钉到 Core1，否则抢 Core0 采样 |
 
 - 双核分工：重逻辑/分发留 Core0；httpd 挂 Core1（httpd_config_t.core_id）。
@@ -70,6 +70,8 @@ ctest --test-dir tests/native/build --output-on-failure
   采集生命周期（on_demand/always/off、切 tab 保持 30 秒、断流宽限）见
   `docs/CAMERA_DESIGN.md` 4.5.1，改之前先读。相机不是采集器：像素走自己的
   HTTP 端点，只有状态和配置回显进 `telemetry` 的 `sys.cam`。
+- **相机帧率在采集侧控制**：`camera_drv` 按实测基准改 OV2640 的 CLKRC / OV5640
+  的 VTS；网络自适应由纯 C 的 `cam_rate` 计算有效帧率，修改也要给它补宿主机测试。
 - 队列/锁都在 main/ 静态共享（bench_http_server 经 ctx 引用）：
   - `s_cfg_mutex`（配置）、`s_frame_mutex`（最新帧）、`s_clients_mutex`（WS 客户端表）
   - 共享结构见 `main/wheel_bench.h`（bench_server_ctx_t）
@@ -110,7 +112,8 @@ main（编排/任务/WiFi/httpd）
  │  └─ rc_render        遥控 JSON 块渲染（纯 C）
  ├─ rc_capture       GPIO 双沿中断测遥控脉宽（IDF 依赖）
  │                   └─ 与验证台模拟注入共用同一个 rc_input 模型，按配置二选一
- ├─ camera_drv       板载 DVP 相机的 esp32-camera 薄封装（IDF 依赖）
+ ├─ camera_drv       板载 DVP 相机的 esp32-camera 薄封装 + 传感器帧率（IDF 依赖）
+ ├─ cam_rate         网络自适应帧率控制器（纯 C，宿主机可测）
  └─ bench_cam        相机生命周期 / 发布缓冲 / cam_publish_task（IDF 依赖）
     └─ bench_cam_stream  /cam/stream 异步 MJPEG 与 /cam/snapshot（IDF 依赖）
 ```

@@ -271,7 +271,7 @@
       <div><label>画质 4–63（值小画质高）</label>
         <input id="cam-quality" type="number" min="4" max="63" value="12">
       </div>
-      <div><label>帧率上限 5–25</label>
+      <div><label>采集/发送帧率上限 5–25</label>
         <input id="cam-fps" type="number" min="5" max="25" value="15">
       </div>
     </div>
@@ -282,8 +282,9 @@
       <label><input type="checkbox" id="cam-ov3" checked> 系统</label>
     </div>
     <div style="margin-top:8px"><button id="cam-apply">应用画面配置</button></div>
-    <p class="hint">按需模式下打开监测页预览才启动相机；切到设置页后流和采集保持 30 秒，
-      超时才停。改分辨率/画质时如果正在预览，相机会重启约 1–2 秒。常开是调试入口，
+    <p class="hint">帧率上限同时约束传感器采集和发送；网络变差时服务端会自动再降采集帧率，
+      恢复后逐步升回上限。按需模式下打开监测页预览才启动相机；切到设置页后流和采集保持
+      30 秒，超时才停。改分辨率/画质时如果正在预览，相机会重启约 1–2 秒。常开是调试入口，
       发热和功耗更高。SVGA 只建议观察用。</p>
   </div>
 </section>
@@ -704,7 +705,10 @@ function camWatchdog() {
 }
 
 function camStatusText(cam) {
-  const spec = `${(cam.res || "qvga").toUpperCase()} · ${cam.fps_cap || 15}fps · q${cam.quality || 12}`;
+  const cap = cam.fps_cap || 15;
+  const eff = cam.fps_eff || cap;
+  const fpsTxt = eff < cap ? `采集 ${eff}fps（上限 ${cap}，自动降速）` : `采集 ${cap}fps`;
+  const spec = `${(cam.res || "qvga").toUpperCase()} · ${fpsTxt} · q${cam.quality || 12}`;
   if (cam.state === "off") return "相机已关闭";
   if (cam.state === "fail") return "相机初始化失败，看串口日志";
   if (cam.state === "init") return "相机启动中…";

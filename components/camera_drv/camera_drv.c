@@ -32,6 +32,17 @@ static const char *TAG = "camera_drv";
 static bool s_inited;
 static char s_sensor_name[16] = "unknown";
 
+/* 帧率控制只改传感器自己的时序寄存器：
+ *   OV2640：CLKRC(传感器 bank 0x11) 的分频
+ *   OV5640：VTS(0x380E/0x380F) 的帧长
+ * 基准寄存器在初始化后读一次，之后按实测基准帧率换算。 */
+static sensor_t *s_sensor;
+static bool s_fps_supported;
+static uint8_t s_base_clkrc;
+static uint8_t s_cur_clkrc;
+static uint16_t s_base_vts;
+static uint16_t s_cur_vts;
+
 static framesize_t res_to_framesize(uint32_t res)
 {
     switch (res) {
@@ -170,11 +181,32 @@ esp_err_t camera_drv_init(const camera_drv_cfg_t *cfg)
         return ESP_FAIL;
     }
 
+    s_sensor = sensor;
+    s_fps_supported = false;
+    s_base_clkrc = s_cur_clkrc = 0;
+    s_base_vts = s_cur_vts = 0;
+    if (sensor->get_reg != NULL && sensor->set_reg != NULL) {
+        if (sensor->id.PID == OV2640_PID) {
+            int clkrc = sensor->get_reg(sensor, 0x0111, 0xFF); /* sensor bank */
+            if (clkrc >= 0) {
+                s_base_clkrc = s_cur_clkrc = (uint8_t)clkrc;
+                s_fps_supported = true;
+            }
+        } else if (sensor->id.PID == OV5640_PID) {
+            int vts = sensor->get_reg(sensor, 0x380E, 0xFFFF);
+            if (vts > 0) {
+                s_base_vts = s_cur_vts = (uint16_t)vts;
+                s_fps_supported = true;
+            }
+        }
+    }
+
     snprintf(s_sensor_name, sizeof(s_sensor_name), "%s", pid_to_name(sensor->id.PID));
-    ESP_LOGI(TAG, "sensor %s PID=0x%04x, %ux%u, q=%lu, jpeg_buf=%u B",
+    ESP_LOGI(TAG, "sensor %s PID=0x%04x, %ux%u, q=%lu, jpeg_buf=%u B, fps_ctrl=%d",
              s_sensor_name, (unsigned)sensor->id.PID,
              (unsigned)camera_drv_width(cfg->res), (unsigned)camera_drv_height(cfg->res),
-             (unsigned long)cfg->quality, (unsigned)camera_drv_max_jpeg(cfg->res));
+             (unsigned long)cfg->quality, (unsigned)camera_drv_max_jpeg(cfg->res),
+             s_fps_supported);
 
     /* 装车方向按 Freenove 例程先上下翻。若仍倒 180°，首版只在页面上做
      * CSS 翻转，不改这里——快照下载的原始 JPEG 保持相机方向。 */
@@ -191,11 +223,91 @@ esp_err_t camera_drv_deinit(void)
     }
     esp_err_t e = esp_camera_deinit();
     s_inited = false;
+    s_sensor = NULL;
+    s_fps_supported = false;
+    s_base_clkrc = s_cur_clkrc = 0;
+    s_base_vts = s_cur_vts = 0;
     snprintf(s_sensor_name, sizeof(s_sensor_name), "%s", "unknown");
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "esp_camera_deinit failed: %d", e);
     }
     return e;
+}
+
+bool camera_drv_fps_control_supported(void)
+{
+    return s_inited && s_fps_supported;
+}
+
+esp_err_t camera_drv_set_fps(uint32_t base_fps, uint32_t target_fps)
+{
+    if (!s_inited || !s_fps_supported || s_sensor == NULL) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (base_fps == 0 || target_fps == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_sensor->id.PID == OV2640_PID) {
+        /* CLKRC 低 6 位是分频：真实帧率 ≈ 基准 / (div+1)。
+         * 目标高于基准时保持基准，不尝试超频。 */
+        uint32_t base_div = s_base_clkrc & 0x3Fu;
+        uint32_t div = base_div;
+        if (target_fps < base_fps) {
+            uint64_t num = (uint64_t)(base_div + 1u) * base_fps;
+            div = (uint32_t)((num + target_fps / 2u) / target_fps) - 1u;
+            if (div < base_div) {
+                div = base_div;
+            }
+            if (div > 0x3Fu) {
+                div = 0x3Fu;
+            }
+        }
+        uint8_t value = (uint8_t)((s_base_clkrc & 0xC0u) | (div & 0x3Fu));
+        if (value == s_cur_clkrc) {
+            return ESP_OK;
+        }
+        int ret = s_sensor->set_reg(s_sensor, 0x0111, 0xFF, value);
+        if (ret != 0) {
+            ESP_LOGW(TAG, "set CLKRC=0x%02x failed: %d", value, ret);
+            return ESP_FAIL;
+        }
+        s_cur_clkrc = value;
+        ESP_LOGD(TAG, "fps %lu -> %lu: CLKRC=0x%02x div=%lu",
+                 (unsigned long)base_fps, (unsigned long)target_fps,
+                 (unsigned)value, (unsigned long)div);
+        return ESP_OK;
+    }
+
+    if (s_sensor->id.PID == OV5640_PID) {
+        /* VTS 是帧长：目标低于基准时按比例拉长 VTS。
+         * 目标高于基准时保持基准（不缩短到传感器默认以下）。 */
+        uint32_t vts = s_base_vts;
+        if (target_fps < base_fps) {
+            uint64_t num = (uint64_t)s_base_vts * base_fps;
+            vts = (uint32_t)((num + target_fps / 2u) / target_fps);
+            if (vts < s_base_vts) {
+                vts = s_base_vts;
+            }
+            if (vts > 0xFFFFu) {
+                vts = 0xFFFFu;
+            }
+        }
+        if (vts == s_cur_vts) {
+            return ESP_OK;
+        }
+        int ret = s_sensor->set_reg(s_sensor, 0x380E, 0xFFFF, (int)vts);
+        if (ret != 0) {
+            ESP_LOGW(TAG, "set VTS=%u failed: %d", (unsigned)vts, ret);
+            return ESP_FAIL;
+        }
+        s_cur_vts = (uint16_t)vts;
+        ESP_LOGD(TAG, "fps %lu -> %lu: VTS=%u",
+                 (unsigned long)base_fps, (unsigned long)target_fps, (unsigned)vts);
+        return ESP_OK;
+    }
+
+    return ESP_ERR_NOT_SUPPORTED;
 }
 
 esp_err_t camera_drv_grab(camera_drv_frame_t *out)

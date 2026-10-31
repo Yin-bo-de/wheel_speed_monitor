@@ -3,6 +3,7 @@
 
 #include "bench_cam.h"
 
+#include "cam_rate.h"
 #include "camera_drv.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -12,10 +13,15 @@
 
 static const char *TAG = "benchcam";
 
+/* 控制器是独立纯 C 组件，帧率边界必须和配置校验保持一致。 */
+_Static_assert(CAM_RATE_FPS_MIN == CFG_CAM_FPS_MIN, "cam_rate min fps mismatch");
+_Static_assert(CAM_RATE_FPS_MAX == CFG_CAM_FPS_MAX, "cam_rate max fps mismatch");
+
 #define CAM_IDLE_POLL_MS 20
 #define CAM_PREVIEW_HOLD_MS 30000
 #define CAM_STREAM_GRACE_MS 30000
 #define CAM_FAIL_LIMIT 3
+#define CAM_FPS_CALIB_FRAMES 7
 #define CAM_DEADLINE_NONE UINT32_MAX
 
 typedef enum {
@@ -30,6 +36,7 @@ typedef enum {
     ACT_NONE = 0,
     ACT_INIT,
     ACT_DEINIT,
+    ACT_SET_FPS,
     ACT_GRAB,
 } cam_action_t;
 
@@ -42,8 +49,8 @@ static cam_state_t s_state = CAM_IDLE;
 static uint32_t s_applied_policy = CFG_CAM_POLICY_ON_DEMAND;
 static uint32_t s_applied_res = CFG_CAM_RES_QVGA;
 static uint32_t s_applied_quality = 12;
-static uint32_t s_cached_fps_cap = 15;
 static uint32_t s_cached_overlay = CFG_CAM_OVERLAY_ALL;
+static cam_rate_t s_rate;
 
 static bool s_preview_active;
 static bool s_stream_active;
@@ -63,6 +70,17 @@ static uint32_t s_fps_window_ms;
 static uint32_t s_fps_frames;
 static uint32_t s_fail_count;
 static uint32_t s_big_frame_drops; /* 帧大于发布缓冲：限频打印，别刷日志 */
+
+/* 传感器帧率控制。基准帧率在初始化后实测，之后按目标/基准换算寄存器；
+ * 传感器不支持时退回"按目标节奏取帧"，至少不让 DMA/拷贝继续全速跑。 */
+static uint32_t s_base_fps;
+static uint32_t s_sensor_fps_applied;
+static bool s_fps_calibrated;
+static bool s_sensor_fps_ok;
+static bool s_calib_started;
+static uint32_t s_calib_frames;
+static uint32_t s_calib_start_ms;
+static uint32_t s_next_grab_ms;
 
 static uint32_t now_ms(void)
 {
@@ -224,6 +242,77 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
     unlock();
 }
 
+/* 丢掉 init 后第一帧，再用随后 7 帧测传感器默认帧率，然后改寄存器。放在相机任务里做，
+ * 不额外增加 init 阻塞；校准期间先按原速出几帧，随后落到目标帧率。 */
+static void calibrate_sensor_fps(uint32_t grab_ms)
+{
+    if (s_fps_calibrated || !s_sensor_fps_ok) {
+        return;
+    }
+    /* 丢掉 init 后队列里的第一帧，避免陈旧帧把基准测高。 */
+    if (!s_calib_started) {
+        s_calib_started = true;
+        return;
+    }
+    if (s_calib_frames == 0) {
+        s_calib_start_ms = grab_ms;
+    }
+    s_calib_frames++;
+    if (s_calib_frames < CAM_FPS_CALIB_FRAMES) {
+        return;
+    }
+
+    uint32_t elapsed = grab_ms - s_calib_start_ms;
+    if (elapsed == 0) {
+        s_calib_frames = 0; /* 时间戳还没走，下一帧重新量 */
+        return;
+    }
+    uint32_t base = (uint32_t)(s_calib_frames - 1) * 1000u / elapsed;
+    if (base < 1) {
+        base = 1;
+    }
+    if (base > 60) {
+        base = 60;
+    }
+    s_base_fps = base;
+    s_fps_calibrated = true;
+
+    uint32_t target;
+    lock();
+    target = cam_rate_effective(&s_rate);
+    unlock();
+
+    esp_err_t e = camera_drv_set_fps(s_base_fps, target);
+    if (e == ESP_OK) {
+        s_sensor_fps_applied = target;
+        ESP_LOGI(TAG, "sensor fps calibrated: base=%lu, target=%lu",
+                 (unsigned long)s_base_fps, (unsigned long)target);
+    } else {
+        s_sensor_fps_ok = false;
+        ESP_LOGW(TAG, "sensor fps set failed (%d), fall back to grab pacing", e);
+    }
+}
+
+/* 传感器不支持控速时的兜底：按有效帧率决定下一次取帧时间。 */
+static void pace_next_grab(void)
+{
+    if (s_sensor_fps_ok) {
+        return;
+    }
+    uint32_t eff;
+    lock();
+    eff = cam_rate_effective(&s_rate);
+    unlock();
+    if (eff == 0) {
+        eff = 1;
+    }
+    uint32_t interval = 1000u / eff;
+    if (interval == 0) {
+        interval = 1;
+    }
+    s_next_grab_ms = now_ms() + interval;
+}
+
 static void cam_task(void *arg)
 {
     (void)arg;
@@ -238,12 +327,16 @@ static void cam_task(void *arg)
         cam_action_t action = ACT_NONE;
         bool idle_to_off = false;
         uint32_t init_res = 0, init_quality = 0;
+        uint32_t fps_to_apply = 0;
 
         lock();
 
         if (have_cfg) {
-            s_cached_fps_cap = cfg_fps_cap;
             s_cached_overlay = cfg_overlay;
+            if (cfg_fps_cap != cam_rate_cap(&s_rate)) {
+                cam_rate_set_cap(&s_rate, cfg_fps_cap);
+                ESP_LOGI(TAG, "fps cap -> %lu", (unsigned long)cam_rate_cap(&s_rate));
+            }
 
             if (cfg_policy != s_applied_policy) {
                 ESP_LOGI(TAG, "policy %s -> %s", policy_str(s_applied_policy),
@@ -256,6 +349,7 @@ static void cam_task(void *arg)
                 } else if (cfg_policy == CFG_CAM_POLICY_ALWAYS) {
                     s_preview_deadline = CAM_DEADLINE_NONE;
                     s_grace_deadline = CAM_DEADLINE_NONE;
+                    cam_rate_set_cap(&s_rate, cam_rate_cap(&s_rate));
                     if (s_state != CAM_ON && s_state != CAM_INIT) {
                         s_init_requested = true;
                     }
@@ -334,8 +428,25 @@ static void cam_task(void *arg)
             }
         }
 
+        if (action == ACT_NONE && s_state == CAM_ON && s_fps_calibrated &&
+            s_sensor_fps_ok) {
+            uint32_t eff = cam_rate_effective(&s_rate);
+            if (eff != s_sensor_fps_applied) {
+                fps_to_apply = eff;
+                s_sensor_fps_applied = eff; /* 失败时下面的分支会关掉传感器控制 */
+                action = ACT_SET_FPS;
+            }
+        }
+
         if (action == ACT_NONE && s_state == CAM_ON) {
-            action = ACT_GRAB;
+            /* 传感器不支持寄存器控速时，用取帧节奏兜底：不取帧就不会把
+             * JPEG 拷进 DMA/发布缓冲。支持控速时交给传感器自己降。 */
+            if (!s_sensor_fps_ok && s_next_grab_ms != 0 &&
+                (int32_t)(now - s_next_grab_ms) < 0) {
+                /* 还没到下一拍，走底部的空闲延时 */
+            } else {
+                action = ACT_GRAB;
+            }
         }
 
         unlock();
@@ -343,8 +454,18 @@ static void cam_task(void *arg)
         switch (action) {
         case ACT_DEINIT:
             (void)camera_drv_deinit();
+            s_fps_calibrated = false;
+            s_sensor_fps_ok = false;
+            s_sensor_fps_applied = 0;
+            s_base_fps = 0;
+            s_calib_started = false;
+            s_calib_frames = 0;
+            s_next_grab_ms = 0;
             lock();
             set_idle_locked(idle_to_off ? CAM_OFF : CAM_IDLE);
+            cam_rate_stream_stop(&s_rate, now_ms());
+            /* 新的相机会话（下一次 init）从用户上限重新起步。 */
+            cam_rate_set_cap(&s_rate, cam_rate_cap(&s_rate));
             if (idle_to_off) {
                 ESP_LOGI(TAG, "camera off");
             } else {
@@ -352,6 +473,20 @@ static void cam_task(void *arg)
             }
             unlock();
             break;
+
+        case ACT_SET_FPS: {
+            esp_err_t e = camera_drv_set_fps(s_base_fps, fps_to_apply);
+            if (e != ESP_OK) {
+                ESP_LOGW(TAG, "sensor fps %lu failed (%d), fall back to grab pacing",
+                         (unsigned long)fps_to_apply, e);
+                s_sensor_fps_ok = false;
+                s_next_grab_ms = 0;
+            } else {
+                ESP_LOGI(TAG, "sensor fps -> %lu (base %lu)",
+                         (unsigned long)fps_to_apply, (unsigned long)s_base_fps);
+            }
+            break;
+        }
 
         case ACT_INIT: {
             bool ok = false;
@@ -382,6 +517,17 @@ static void cam_task(void *arg)
                 s_fps_frames = 0;
                 s_last_frame_ms = 0;
                 s_init_requested = false; /* 本次 init 已满足发起它的请求 */
+                s_fps_calibrated = false;
+                s_calib_started = false;
+                s_calib_frames = 0;
+                s_calib_start_ms = 0;
+                s_sensor_fps_applied = 0;
+                s_next_grab_ms = 0;
+                s_base_fps = 0;
+                s_sensor_fps_ok = camera_drv_fps_control_supported();
+                if (!s_sensor_fps_ok) {
+                    ESP_LOGW(TAG, "sensor fps control unsupported, use grab pacing");
+                }
                 if (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND) {
                     if (!s_preview_active && s_preview_deadline == CAM_DEADLINE_NONE) {
                         s_preview_deadline = ready_ms + CAM_PREVIEW_HOLD_MS;
@@ -393,8 +539,9 @@ static void cam_task(void *arg)
                     s_preview_deadline = CAM_DEADLINE_NONE;
                     s_grace_deadline = CAM_DEADLINE_NONE;
                 }
-                ESP_LOGI(TAG, "camera on: %s, q=%lu", res_str(init_res),
-                         (unsigned long)init_quality);
+                ESP_LOGI(TAG, "camera on: %s, q=%lu, target=%lufps",
+                         res_str(init_res), (unsigned long)init_quality,
+                         (unsigned long)cam_rate_effective(&s_rate));
             } else {
                 free_pub_locked();
                 s_state = CAM_FAIL;
@@ -403,6 +550,13 @@ static void cam_task(void *arg)
                 s_init_requested = false;
                 s_preview_deadline = CAM_DEADLINE_NONE;
                 s_grace_deadline = CAM_DEADLINE_NONE;
+                s_fps_calibrated = false;
+                s_sensor_fps_ok = false;
+                s_sensor_fps_applied = 0;
+                s_base_fps = 0;
+                s_calib_started = false;
+                s_calib_frames = 0;
+                s_next_grab_ms = 0;
                 ESP_LOGE(TAG, "camera state=fail; next stream/snapshot retries");
             }
             unlock();
@@ -413,8 +567,11 @@ static void cam_task(void *arg)
             esp_err_t e = camera_drv_grab(&frame);
             if (e == ESP_OK) {
                 /* 取帧会阻塞，时间戳按拿到帧的时刻算，不能用循环开头的 now。 */
-                publish_frame(&frame, now_ms());
+                uint32_t grab_ms = now_ms();
+                publish_frame(&frame, grab_ms);
                 camera_drv_release(&frame);
+                calibrate_sensor_fps(grab_ms);
+                pace_next_grab();
             } else {
                 bool fail_now = false;
                 lock();
@@ -434,7 +591,15 @@ static void cam_task(void *arg)
                     free_pub_locked();
                     s_preview_deadline = CAM_DEADLINE_NONE;
                     s_grace_deadline = CAM_DEADLINE_NONE;
+                    cam_rate_stream_stop(&s_rate, now_ms());
                     unlock();
+                    s_fps_calibrated = false;
+                    s_sensor_fps_ok = false;
+                    s_sensor_fps_applied = 0;
+                    s_base_fps = 0;
+                    s_calib_started = false;
+                    s_calib_frames = 0;
+                    s_next_grab_ms = 0;
                 }
             }
             break;
@@ -463,7 +628,7 @@ esp_err_t bench_cam_start(cfg_params_t *cfg, SemaphoreHandle_t cfg_mutex)
     s_applied_policy = cfg->cam_policy;
     s_applied_res = cfg->cam_res;
     s_applied_quality = cfg->cam_quality;
-    s_cached_fps_cap = cfg->cam_fps_cap;
+    cam_rate_init(&s_rate, cfg->cam_fps_cap);
     s_cached_overlay = cfg->overlay_mask;
     s_state = (cfg->cam_policy == CFG_CAM_POLICY_OFF) ? CAM_OFF : CAM_IDLE;
     s_init_requested = (cfg->cam_policy == CFG_CAM_POLICY_ALWAYS);
@@ -478,7 +643,7 @@ esp_err_t bench_cam_start(cfg_params_t *cfg, SemaphoreHandle_t cfg_mutex)
     }
     ESP_LOGI(TAG, "camera service started: policy=%s res=%s q=%lu fps_cap=%lu",
              policy_str(s_applied_policy), res_str(s_applied_res),
-             (unsigned long)s_applied_quality, (unsigned long)s_cached_fps_cap);
+             (unsigned long)s_applied_quality, (unsigned long)cam_rate_cap(&s_rate));
     return ESP_OK;
 }
 
@@ -502,6 +667,7 @@ bench_cam_stream_result_t bench_cam_stream_acquire(void)
         s_preview_active = true;
         s_preview_deadline = CAM_DEADLINE_NONE;
         s_grace_deadline = CAM_DEADLINE_NONE;
+        cam_rate_stream_start(&s_rate, now_ms());
         if (s_state != CAM_ON) {
             s_init_requested = true;
         }
@@ -521,8 +687,33 @@ void bench_cam_stream_release(void)
         return;
     }
     s_stream_active = false;
+    /* 断流后保留降速结果：网络可能还没恢复，下一次请求先按低帧率起步，
+     * 由 cam_rate 的 recovery 慢慢升回去；相机 deinit 时才恢复用户上限。
+     * always 没有流时不存在网络压力，直接回到用户上限。 */
+    cam_rate_stream_stop(&s_rate, now_ms());
+    if (s_applied_policy == CFG_CAM_POLICY_ALWAYS) {
+        cam_rate_set_cap(&s_rate, cam_rate_cap(&s_rate));
+    }
     if (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_state == CAM_ON) {
         s_grace_deadline = now_ms() + CAM_STREAM_GRACE_MS;
+    }
+    unlock();
+}
+
+void bench_cam_report_send_time(uint32_t send_ms)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    lock();
+    uint32_t before = cam_rate_effective(&s_rate);
+    uint32_t after = cam_rate_report_send(&s_rate, send_ms, now_ms());
+    if (after < before) {
+        ESP_LOGW(TAG, "network throttle: %lu -> %lu fps (send %lu ms)",
+                 (unsigned long)before, (unsigned long)after, (unsigned long)send_ms);
+    } else if (after > before) {
+        ESP_LOGI(TAG, "network recovered: %lu -> %lu fps",
+                 (unsigned long)before, (unsigned long)after);
     }
     unlock();
 }
@@ -680,7 +871,8 @@ void bench_cam_get_status(telem_cam_status_t *out)
     out->clients = s_stream_active ? 1 : 0;
     out->res = res_str(s_applied_res);
     out->quality = (uint8_t)s_applied_quality;
-    out->fps_cap = (uint8_t)s_cached_fps_cap;
+    out->fps_cap = (uint8_t)cam_rate_cap(&s_rate);
+    out->fps_eff = (uint8_t)cam_rate_effective(&s_rate);
     out->overlay_mask = s_cached_overlay;
     out->bytes = (uint32_t)s_frame_len;
 

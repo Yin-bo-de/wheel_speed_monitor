@@ -5,5 +5,5 @@ idf_component_register(
     EMBED_FILES "www/index.html"
     REQUIRES nvs_flash esp_wifi esp_netif esp_event esp_http_server json heap
               telemetry wheel_speed wheel_sensor strategy servo_act servo_drv
-              rc_input rc_capture camera_drv
+              rc_input rc_capture camera_drv cam_rate
 )

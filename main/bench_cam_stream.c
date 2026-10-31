@@ -8,6 +8,7 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -147,7 +148,9 @@ static void cam_stream_task(void *arg)
 
         telem_cam_status_t st;
         bench_cam_get_status(&st);
-        uint32_t fps_cap = st.fps_cap != 0 ? st.fps_cap : 15;
+        /* 发送节奏跟随实际生效帧率；它由网络控制器下调，可能低于用户配置。 */
+        uint32_t fps_send = st.fps_eff != 0 ? st.fps_eff
+                          : (st.fps_cap != 0 ? st.fps_cap : 15);
         size_t frame_cap = bench_cam_max_frame();
         /* +2 给 JPEG 尾部的 CRLF，别在 frame_cap 正好用满时越界一字节 */
         uint8_t *send_buf = heap_caps_malloc(frame_cap + CAM_PART_HDR_CAP + 2,
@@ -181,8 +184,10 @@ static void cam_stream_task(void *arg)
              * 设置页改完立即生效，不要求用户等流重连。 */
             if (now - last_cfg_ms >= 1000) {
                 bench_cam_get_status(&st);
-                if (st.fps_cap != 0) {
-                    fps_cap = st.fps_cap;
+                if (st.fps_eff != 0) {
+                    fps_send = st.fps_eff;
+                } else if (st.fps_cap != 0) {
+                    fps_send = st.fps_cap;
                 }
                 last_cfg_ms = now;
             }
@@ -228,8 +233,11 @@ static void cam_stream_task(void *arg)
             send_buf[hlen + len] = '\r';
             send_buf[hlen + len + 1] = '\n';
 
+            int64_t send_start_us = esp_timer_get_time();
             e = httpd_resp_send_chunk(req, (const char *)send_buf,
                                       (ssize_t)(hlen + len + 2));
+            uint32_t send_ms = (uint32_t)((esp_timer_get_time() - send_start_us) / 1000);
+            bench_cam_report_send_time(send_ms);
             if (e != ESP_OK) {
                 ESP_LOGW(TAG, "send chunk failed: %d", e);
                 break;
@@ -238,7 +246,7 @@ static void cam_stream_task(void *arg)
             last_send_ms = now;
             frames++;
             bytes += (uint32_t)len;
-            uint32_t interval = 1000u / fps_cap;
+            uint32_t interval = 1000u / fps_send;
             if (interval == 0) {
                 interval = 1;
             }

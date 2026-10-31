@@ -6,7 +6,7 @@
  * blob 版本迁移：v1（32B）是一期的布局；v2（72B）在尾部追加舵机与锁定策略
  * 参数；v3（76B）把舵机脉宽从"共享的 min/center/max + invert"换成"每通道的
  * 解锁/锁定两档"；v4（84B）在尾部追加遥控输入（模拟开关与三路模拟脉宽）；
- * v5（92B）在尾部追加摄像头策略、分辨率、画质、发送帧率上限与叠加位图。
+ * v5（92B）在尾部追加摄像头策略、分辨率、画质、采集/发送帧率上限与叠加位图。
  * 解包按首字节版本号分派——旧 blob 仍可解，缺失字段取默认值（v2 还要按旧
  * 语义换算，见 cfg_params_unpack），上层解出后回写最新版，升级不丢用户已设的配置。
  */
@@ -134,7 +134,7 @@ typedef struct {
     uint32_t cam_policy;    /* CFG_CAM_POLICY_*，默认 on_demand */
     uint32_t cam_res;       /* CFG_CAM_RES_*，默认 QVGA */
     uint32_t cam_quality;   /* JPEG quality 4..63，值小画质高 */
-    uint32_t cam_fps_cap;   /* 发送帧率上限 5..25，不影响传感器采集 */
+    uint32_t cam_fps_cap;   /* 采集/发送帧率上限 5..25；传感器支持时直接降采集帧率 */
     uint32_t overlay_mask;  /* CFG_CAM_OVERLAY_* 位图 */
 } cfg_params_t;
 

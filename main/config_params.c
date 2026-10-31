@@ -45,7 +45,7 @@ void cfg_params_default(cfg_params_t *cfg)
     cfg->cam_policy = CFG_CAM_POLICY_ON_DEMAND;
     cfg->cam_res = CFG_CAM_RES_QVGA;
     cfg->cam_quality = 12;
-    cfg->cam_fps_cap = 15;
+    cfg->cam_fps_cap = 15; /* 采集和发送共用；网络差时服务端会临时下调 */
     cfg->overlay_mask = CFG_CAM_OVERLAY_ALL;
 }
 

@@ -45,6 +45,16 @@ esp_err_t camera_drv_init(const camera_drv_cfg_t *cfg);
 
 esp_err_t camera_drv_deinit(void);
 
+/* 传感器是否支持寄存器级帧率控制（当前覆盖 OV2640 与 OV5640）。
+ * 不支持时上层仍可降低取帧节奏，但传感器本身仍按原帧率输出。 */
+bool camera_drv_fps_control_supported(void);
+
+/* 把传感器帧率设到 target_fps。base_fps 是初始化后、默认时序下实测到的
+ * 基准帧率；函数按传感器类型换算 CLKRC / VTS，不重新初始化。
+ * target_fps 高于基准时保持基准（传感器不能凭空超频），低于时降低。
+ * 只有 cam_publish_task 调用。 */
+esp_err_t camera_drv_set_fps(uint32_t base_fps, uint32_t target_fps);
+
 /* 取一帧，阻塞到驱动自己的取帧超时（esp32-camera 约 4 秒）或拿到帧。
  * 成功返回 ESP_OK，out->handle 必须交给 camera_drv_release。 */
 esp_err_t camera_drv_grab(camera_drv_frame_t *out);
