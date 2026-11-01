@@ -65,8 +65,12 @@
   /* ---- 画面回传 ---- */
   .cam-wrap { position:relative; background:#000; border:1px solid var(--border);
     border-radius:6px; min-height:240px; overflow:hidden; }
-  .cam-wrap img { display:block; width:100%; max-height:58vh; object-fit:contain; background:#000; }
-  .cam-wrap img.flipped { transform:scale(-1,-1); }
+  /* 视频用绝对定位，宽高由 camUpdateViewGeometry() 按旋转角算：
+     90°/270° 时旋转前的盒子会比容器大，靠 overflow:hidden 裁掉空白部分，
+     旋转后的可见区域仍落在容器里。 */
+  .cam-wrap img { display:block; position:absolute; top:50%; left:50%;
+    width:100%; height:auto; max-width:none; max-height:none; object-fit:contain;
+    background:#000; transform:translate(-50%,-50%); transform-origin:center center; }
   .cam-wrap canvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:1; }
   .cam-hint { position:absolute; inset:0; z-index:2; display:flex; align-items:center; justify-content:center;
     text-align:center; padding:12px; color:#aaa; font-size:13px; background:rgba(0,0,0,0.35); }
@@ -74,6 +78,11 @@
   .cam-tools label { display:flex; align-items:center; gap:4px; }
   .cam-tools .spacer { flex:1 1 auto; }
   .cam-status { font-variant-numeric:tabular-nums; }
+  /* 手机上旋转按钮要够大；角度固定在两个按钮中间，避免布局跳动。 */
+  .cam-rot-tools { display:inline-flex; align-items:center; gap:6px; }
+  .cam-rot-tools button { padding:8px 12px; }
+  .cam-rot-tools b { min-width:3.2em; text-align:center; font-variant-numeric:tabular-nums;
+    color:var(--text); }
   /* 全屏时用容器本身作为全屏元素，视频和 canvas 叠加层一起进去。
      退出按钮放在容器内部，避免全屏后外面的工具栏不可见。 */
   .cam-fs-exit { display:none; position:absolute; top:10px; right:10px; z-index:3;
@@ -139,7 +148,11 @@
       <label><input type="checkbox" id="ov-rc" checked> 遥控</label>
       <label><input type="checkbox" id="ov-sys" checked> 系统</label>
       <label><input type="checkbox" id="cam-static"> 静态帧模式</label>
-      <label><input type="checkbox" id="cam-flip"> 画面翻转</label>
+      <span class="cam-rot-tools">
+        <button id="cam-rot-left" type="button" aria-label="向左旋转 90 度">左转 90°</button>
+        <b id="cam-rot-label" aria-live="polite">0°</b>
+        <button id="cam-rot-right" type="button" aria-label="向右旋转 90 度">右转 90°</button>
+      </span>
       <span class="spacer"></span>
       <button id="cam-full" type="button">全屏</button>
       <button id="cam-snap">原始快照 ⤓</button>
@@ -349,6 +362,9 @@ let camStatic = false;
 let camPollTimer = null;
 let camStaticUrl = null;
 let camErrorTimer = null;
+let camRotation = 0;
+const CAM_ROTATION_KEY = "wheelCamRotation";
+const CAM_DEFAULT_ASPECT = 4 / 3;
 const CAM_OVERLAY_NAMES = ["轮速", "舵机", "遥控", "系统"];
 
 function $(id) { return document.getElementById(id); }
@@ -451,10 +467,10 @@ function showTab(name) {
       camPollStop();
     }
   }
-  /* canvas 在隐藏/移出布局时 clientWidth 为 0，切回来必须重画一次 */
+  /* canvas 在隐藏/移出布局时 clientWidth 为 0，切回来必须重算尺寸再重画 */
   if (name === "monitor") {
     drawChart();
-    camResizeCanvas();
+    camUpdateViewGeometry();
   }
 }
 
@@ -672,6 +688,94 @@ function camStoreGet(key) {
 }
 function camStoreSet(key, value) {
   try { localStorage.setItem(key, value); } catch (_) {}
+}
+function camStoreDel(key) {
+  try { localStorage.removeItem(key); } catch (_) {}
+}
+
+/* 只接受 90° 的整数倍：localStorage 里就算有脏值，也别把布局算歪。 */
+function camNormalizeRotation(deg) {
+  const n = Number(deg);
+  if (!Number.isFinite(n)) return 0;
+  return ((Math.round(n / 90) * 90) % 360 + 360) % 360;
+}
+
+function camLoadRotation() {
+  const saved = camStoreGet(CAM_ROTATION_KEY);
+  if (saved !== null) return camNormalizeRotation(saved);
+  /* 旧版只有一个「画面翻转」勾选框，勾过等于 180°。迁移完删掉旧键，
+   * 免得以后残留值再干扰。 */
+  const legacy = camStoreGet("wheelCamFlip");
+  if (legacy !== null) {
+    camStoreDel("wheelCamFlip");
+    if (legacy === "1") {
+      camStoreSet(CAM_ROTATION_KEY, "180");
+      return 180;
+    }
+  }
+  return 0;
+}
+
+function camAspectRatio() {
+  const img = $("cam-view");
+  if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+    return img.naturalWidth / img.naturalHeight;
+  }
+  /* QVGA/VGA/SVGA 都是 4:3；首帧还没到时先按默认比例排一次。 */
+  return CAM_DEFAULT_ASPECT;
+}
+
+function camUpdateRotationUi() {
+  const label = $("cam-rot-label");
+  if (label) label.textContent = camRotation + "°";
+}
+
+function camSetRotation(deg) {
+  camRotation = camNormalizeRotation(deg);
+  camStoreSet(CAM_ROTATION_KEY, String(camRotation));
+  camUpdateRotationUi();
+  camUpdateViewGeometry();
+}
+
+/* 旋转只改显示：先按角度定容器高度，再反推旋转前的图片盒子。
+ * 90°/270° 的盒子会比容器宽，转回来后的可见区域正好落在容器里。 */
+function camUpdateViewGeometry() {
+  const wrap = $("cam-wrap"), img = $("cam-view");
+  if (!wrap || !img) return;
+
+  /* 全屏高度由样式表铺满视口，内联高度会盖掉它，必须先清掉。 */
+  if (camIsFullscreen()) {
+    wrap.style.height = "";
+  } else {
+    const w = wrap.clientWidth || (wrap.parentElement && wrap.parentElement.clientWidth) || 320;
+    const aspect = camAspectRatio();
+    const wantH = camRotation % 180 === 0 ? w / aspect : w * aspect;
+    const maxH = Math.max(240, Math.round(window.innerHeight * 0.58));
+    wrap.style.height = Math.round(Math.min(wantH, maxH)) + "px";
+  }
+
+  const W = wrap.clientWidth || 320;
+  const H = wrap.clientHeight || 240;
+  const aspect = camAspectRatio();
+  const rotated = camRotation % 180 !== 0;
+
+  let dw, dh;
+  if (rotated) {
+    dh = Math.min(H, W * aspect);
+    dw = dh / aspect;
+  } else {
+    dw = Math.min(W, H * aspect);
+    dh = dw / aspect;
+  }
+  /* 90°/270° 时先把盒子反过来设，rotate 之后才是屏幕上看到的宽高。 */
+  const boxW = rotated ? dh : dw;
+  const boxH = rotated ? dw : dh;
+
+  img.style.width = boxW + "px";
+  img.style.height = boxH + "px";
+  img.style.transform = "translate(-50%, -50%) rotate(" + camRotation + "deg)";
+
+  camResizeCanvas();
 }
 
 function camSendPreview(active) {
@@ -1007,15 +1111,15 @@ function camPseudoFullscreen(on) {
   document.body.classList.toggle("cam-fs-lock", on);
   const btn = $("cam-full");
   if (btn) btn.textContent = on ? "退出全屏" : "全屏";
-  requestAnimationFrame(camResizeCanvas);
+  requestAnimationFrame(camUpdateViewGeometry);
 }
 
 function camUpdateFullscreenLabel() {
   const btn = $("cam-full");
   if (btn) btn.textContent = camIsFullscreen() ? "退出全屏" : "全屏";
-  /* 全屏切换后容器尺寸要下一帧才稳定，再画一次 overlay。 */
-  requestAnimationFrame(camResizeCanvas);
-  setTimeout(camResizeCanvas, 80);
+  /* 全屏切换后容器尺寸要下一帧才稳定，再算一次图片盒子和 overlay。 */
+  requestAnimationFrame(camUpdateViewGeometry);
+  setTimeout(camUpdateViewGeometry, 80);
 }
 
 function camExitFullscreen() {
@@ -1168,17 +1272,13 @@ window.addEventListener("DOMContentLoaded", () => {
   $("cam-static").checked = camStatic;
   $("cam-static").addEventListener("change", () => camSetStatic($("cam-static").checked));
 
-  /* 装车方向不对时只翻画面，叠加层保持正向；设置存本地，不占 NVS 字段。 */
-  const flip = camStoreGet("wheelCamFlip") === "1";
-  $("cam-flip").checked = flip;
-  $("cam-view").classList.toggle("flipped", flip);
-  $("cam-flip").addEventListener("change", () => {
-    const on = $("cam-flip").checked;
-    $("cam-view").classList.toggle("flipped", on);
-    camStoreSet("wheelCamFlip", on ? "1" : "0");
-  });
+  /* 装车方向可能倒装或侧装：只旋转视频，叠加层保持屏幕方向；角度存本地。 */
+  camRotation = camLoadRotation();
+  camUpdateRotationUi();
+  $("cam-rot-left").onclick = () => camSetRotation(camRotation - 90);
+  $("cam-rot-right").onclick = () => camSetRotation(camRotation + 90);
 
-  $("cam-view").addEventListener("load", camResizeCanvas);
+  $("cam-view").addEventListener("load", camUpdateViewGeometry);
   $("cam-view").addEventListener("error", () => {
     if (camStatic || activeTab !== "monitor" || document.hidden) return;
     if (camErrorTimer) return;
@@ -1201,15 +1301,15 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
     if (activeTab === "monitor") {
-      camResizeCanvas();
+      camUpdateViewGeometry();
       if (camStatic) camPollStart();
       else camSyncView();
     }
   });
-  window.addEventListener("resize", camResizeCanvas);
+  window.addEventListener("resize", camUpdateViewGeometry);
 
   connectWS();
-  camResizeCanvas();
+  camUpdateViewGeometry();
   if (camStatic) camPollStart();
   else camStartStream(false);
 
