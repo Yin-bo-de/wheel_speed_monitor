@@ -805,11 +805,13 @@ void bench_cam_report_send_time(uint32_t send_ms)
     uint32_t before = cam_rate_effective(&s_rate);
     uint32_t after = cam_rate_report_send(&s_rate, send_ms, now_ms());
     if (after < before) {
-        ESP_LOGW(TAG, "network throttle: %lu -> %lu fps (send %lu ms)",
-                 (unsigned long)before, (unsigned long)after, (unsigned long)send_ms);
+        ESP_LOGW(TAG, "network throttle: %lu -> %lu fps (avg_send %lu ms)",
+                 (unsigned long)before, (unsigned long)after,
+                 (unsigned long)s_rate.last_avg_ms);
     } else if (after > before) {
-        ESP_LOGI(TAG, "network recovered: %lu -> %lu fps",
-                 (unsigned long)before, (unsigned long)after);
+        ESP_LOGI(TAG, "network recovered: %lu -> %lu fps (avg_send %lu ms)",
+                 (unsigned long)before, (unsigned long)after,
+                 (unsigned long)s_rate.last_avg_ms);
     }
     unlock();
 }
