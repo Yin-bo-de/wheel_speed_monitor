@@ -164,6 +164,31 @@ idf.py build
 idf.py -p /dev/cu.usbmodemXXX flash monitor
 ```
 
+## 无线固件升级
+
+第一次启用 OTA 要插一次 USB：分区表从单 app 改成双 OTA，bootloader 和分区表
+都变了，这一步绕不过去。
+
+```bash
+idf.py -p /dev/cu.usbmodemXXX flash monitor
+```
+
+`idf.py flash` 会一并烧写新的分区表和 `ota_data_initial.bin`，不需要手动擦
+otadata；NVS 分区偏移没变，原有的轮径、舵机等配置保留。
+
+之后每次升级：
+
+1. 改根目录 `CMakeLists.txt` 里的 `PROJECT_VER`；
+2. `idf.py build`；
+3. 连上 `wheel-bench` 热点，打开 `http://192.168.4.1/`；
+4. 设置页最底部「固件升级」选 `build/wheel_speed_monitor.bin`，确认后等待设备重启。
+
+新固件启动后要等 WiFi 和 httpd 都可用才会被标记为有效。起不来或反复重启会
+自动回滚到上一版本。想主动退回上一版本，点卡片里的「回退到另一版本」。
+
+升级中断、断电、镜像不合法都不会切换启动分区，设备继续跑旧固件。真要刷成砖，
+插 USB 重新烧录即可。
+
 ## 使用
 
 1. 烧录后手机/电脑连 WiFi 热点 `wheel-bench`（开放，无密码）。
