@@ -274,11 +274,12 @@ static void cam_stream_task(void *arg)
                 uint32_t avg_frame = (uint32_t)(stat_bytes / stat_frames);
                 bench_cam_get_status(&st);
                 ESP_LOGI(TAG,
-                         "stream 5s: send=%.1ffps grab=%.1ffps target=%u/%u "
-                         "avg_send=%lums frame=%luB",
-                         stat_frames * 1000.0f / (float)elapsed, st.fps,
+                         "stream 5s: send=%.1ffps target=%u/%u avg_send=%lums "
+                         "frame=%luB grab(1s)=%.1ffps",
+                         stat_frames * 1000.0f / (float)elapsed,
                          (unsigned)st.fps_eff, (unsigned)st.fps_cap,
-                         (unsigned long)avg_send_ms, (unsigned long)avg_frame);
+                         (unsigned long)avg_send_ms, (unsigned long)avg_frame,
+                         st.fps);
                 stat_frames = 0;
                 stat_send_us = 0;
                 stat_bytes = 0;

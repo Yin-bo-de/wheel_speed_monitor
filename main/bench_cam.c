@@ -81,7 +81,10 @@ static uint32_t s_last_frame_ms;
 static float s_fps;
 static uint32_t s_fps_window_ms;
 static uint32_t s_fps_frames;
-static uint32_t s_fps_log_ms; /* 采集帧率日志节流：5 秒一条，别刷屏 */
+/* 采集帧率日志用独立的 5 秒窗口，和 camstream 的发送窗口同口径；
+ * s_fps 仍按 1 秒窗口更新，遥测页面要的是及时性。 */
+static uint32_t s_fps_log_start_ms;
+static uint32_t s_fps_log_frames;
 static uint32_t s_fail_count;
 static uint32_t s_big_frame_drops; /* 帧大于发布缓冲：限频打印，别刷日志 */
 
@@ -196,6 +199,9 @@ static void free_pub_locked(void)
     s_fps = 0.0f;
     s_fps_window_ms = 0;
     s_fps_frames = 0;
+    /* 相机停过一段时间再启动，旧窗口会把空闲时间算进平均帧率。 */
+    s_fps_log_start_ms = 0;
+    s_fps_log_frames = 0;
 }
 
 /* 调用时 s_lock 已持有；只负责清运行时缓冲和状态，不碰相机句柄。 */
@@ -251,6 +257,12 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
             s_fps_frames = 0;
         }
         s_fps_frames++;
+        if (s_fps_log_start_ms == 0) {
+            s_fps_log_start_ms = now;
+            s_fps_log_frames = 0;
+        }
+        s_fps_log_frames++;
+
         uint32_t elapsed = now - s_fps_window_ms;
         if (elapsed >= 1000) {
             s_fps = (float)s_fps_frames * 1000.0f / (float)elapsed;
@@ -258,10 +270,12 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
             s_fps_frames = 0;
             /* 采集侧实测。和 camstream 的 stream 日志对齐看：grab 低是采集，
              * grab 正常而 send 低是网络。 */
-            if (now - s_fps_log_ms >= 5000) {
-                s_fps_log_ms = now;
+            uint32_t log_elapsed = now - s_fps_log_start_ms;
+            if (log_elapsed >= 5000) {
                 log_fps = true;
-                fps_snapshot = s_fps;
+                fps_snapshot = (float)s_fps_log_frames * 1000.0f / (float)log_elapsed;
+                s_fps_log_start_ms = now;
+                s_fps_log_frames = 0;
                 target_snapshot = cam_rate_effective(&s_rate);
                 cap_snapshot = cam_rate_cap(&s_rate);
             }
