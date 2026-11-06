@@ -78,6 +78,9 @@ ctest --test-dir tests/native/build --output-on-failure
   cache 不丢状态）。新固件启动后 `app_main` 在 httpd 就绪时调用
   `bench_ota_mark_valid()`，没确认就崩溃会被 bootloader 回滚。分区表变更、
   版本号维护和首次 USB 烧录见 README「无线固件升级」。
+- **httpd URI 槽位**：`HTTPD_DEFAULT_CONFIG()` 默认 `max_uri_handlers=8`，
+  现在页面 4 + 相机 2 + OTA 3 共 9 个，已显式扩到 12。新增端点时先核对这个数，
+  注册失败会让 `bench_http_server_start` 返回错误、设备启动即 abort。
 - 队列/锁都在 main/ 静态共享（bench_http_server 经 ctx 引用）：
   - `s_cfg_mutex`（配置）、`s_frame_mutex`（最新帧）、`s_clients_mutex`（WS 客户端表）
   - 共享结构见 `main/wheel_bench.h`（bench_server_ctx_t）
