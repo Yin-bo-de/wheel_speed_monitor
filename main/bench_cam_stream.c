@@ -20,6 +20,9 @@ static const char *TAG = "camstream";
 #define CAM_STREAM_QUEUE_LEN 2
 #define CAM_STREAM_START_WAIT_MS 5000
 #define CAM_STREAM_IDLE_TIMEOUT_MS 10000
+/* 流任务等新帧通知的超时：正常每帧都会被叫醒，超时只用于周期性检查
+ * 停止条件、配置和空闲断流。 */
+#define CAM_STREAM_WAIT_MS 20
 #define CAM_PART_HDR_CAP 128
 /* 边界串故意长一点：JPEG 里偶尔出现 "frame" 这种短串不至于被误判成边界。 */
 #define CAM_BOUNDARY "wheelcamframe"
@@ -120,6 +123,9 @@ static void cam_stream_task(void *arg)
     (void)arg;
     httpd_req_t *req = NULL;
 
+    /* 发布任务靠这个句柄通知新帧；发送节奏由此锁定到传感器出帧。 */
+    bench_cam_set_frame_wait_task(xTaskGetCurrentTaskHandle());
+
     for (;;) {
         if (xQueueReceive(s_req_q, &req, portMAX_DELAY) != pdTRUE || req == NULL) {
             continue;
@@ -173,7 +179,15 @@ static void cam_stream_task(void *arg)
         uint32_t next_send_ms = now;
         uint32_t last_cfg_ms = now;
 
+        /* 没有流的时候发布任务也在发通知，计数可能累积；
+         * 清一次，从下一个新帧开始算。 */
+        (void)ulTaskNotifyTake(pdTRUE, 0);
+
         while (1) {
+            /* 等新帧通知，而不是固定节拍轮询：发送间隔由传感器出帧驱动，
+             * 采集与发送之间不再有拍频。超时只负责周期性检查。 */
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CAM_STREAM_WAIT_MS));
+
             if (bench_cam_stream_should_stop() ||
                 bench_cam_state() != BENCH_CAM_STATE_ON) {
                 break;
@@ -192,10 +206,9 @@ static void cam_stream_task(void *arg)
                 last_cfg_ms = now;
             }
 
-            /* 帧率上限只管发送：没到下一个发送窗口就先等，到点后才从发布
-             * 缓冲取最新帧。先取再等会把刚拷的帧白白丢掉。 */
+            /* 帧率上限只管发送：限速窗口没到就跳过这一帧，回去等下一个
+             * 通知；窗口到了再取最新帧，中间帧自然丢掉，不积压。 */
             if ((int32_t)(now - next_send_ms) < 0) {
-                vTaskDelay(pdMS_TO_TICKS(5));
                 continue;
             }
 
@@ -209,7 +222,6 @@ static void cam_stream_task(void *arg)
                     ESP_LOGW(TAG, "stream idle timeout");
                     break;
                 }
-                vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
             if (e != ESP_OK) {

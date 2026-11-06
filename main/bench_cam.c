@@ -21,7 +21,13 @@ _Static_assert(CAM_RATE_FPS_MAX == CFG_CAM_FPS_MAX, "cam_rate max fps mismatch")
 #define CAM_PREVIEW_HOLD_MS 30000
 #define CAM_STREAM_GRACE_MS 30000
 #define CAM_FAIL_LIMIT 3
-#define CAM_FPS_CALIB_FRAMES 7
+/* 7 帧只有 0.5 秒，一次抢占就能把基准拉偏；20 帧把偶发抖动摊薄，
+ * 仍然是按需预览可接受的启动等待（默认帧率下约 1.3 秒）。 */
+#define CAM_FPS_CALIB_FRAMES 20
+/* init 后 AEC/AGC 还在收敛，暗环境前几帧曝光时间长，先丢几帧再测。 */
+#define CAM_FPS_CALIB_SETTLE_FRAMES 5
+/* 窗口内最大间隔超过平均值的这个倍数，判为长阻塞污染，重测一次。 */
+#define CAM_FPS_CALIB_OUTLIER_FACTOR 2
 #define CAM_DEADLINE_NONE UINT32_MAX
 
 typedef enum {
@@ -52,6 +58,10 @@ static uint32_t s_applied_quality = 12;
 static uint32_t s_cached_overlay = CFG_CAM_OVERLAY_ALL;
 static cam_rate_t s_rate;
 
+/* 流任务句柄：发布新帧后直接通知它，发送节奏锁定到传感器出帧。
+ * 只由流任务在启动时写一次，指针读写是原子的，不需要加锁。 */
+static TaskHandle_t s_frame_wait_task;
+
 static bool s_preview_active;
 static bool s_stream_active;
 static bool s_stop_stream;
@@ -79,7 +89,11 @@ static bool s_fps_calibrated;
 static bool s_sensor_fps_ok;
 static bool s_calib_started;
 static uint32_t s_calib_frames;
+static uint32_t s_calib_settle;
 static uint32_t s_calib_start_ms;
+static uint32_t s_calib_last_grab_ms;
+static uint32_t s_calib_max_gap_ms;
+static uint32_t s_calib_retries;
 static uint32_t s_next_grab_ms;
 
 static uint32_t now_ms(void)
@@ -212,6 +226,7 @@ static bool alloc_pub_locked(uint32_t res)
 
 static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
 {
+    bool published = false;
     lock();
     /* 能拿到帧就说明传感器还在出数据，失败计数清零；帧太大只是发布缓冲
      * 不够，不该和"取帧超时"混成同一个故障。 */
@@ -221,6 +236,7 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
         s_frame_len = frame->len;
         s_frame_gen++;
         s_last_frame_ms = now;
+        published = true;
 
         if (s_fps_window_ms == 0) {
             s_fps_window_ms = now;
@@ -240,22 +256,60 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
         }
     }
     unlock();
+
+    /* 通知放在锁外：发送侧不在锁内做任何事，这里也不持锁做调度操作。
+     * 没有流时通知会累积计数，流任务开始发送前会清一次。 */
+    if (published && s_frame_wait_task != NULL) {
+        xTaskNotifyGive(s_frame_wait_task);
+    }
 }
 
-/* 丢掉 init 后第一帧，再用随后 7 帧测传感器默认帧率，然后改寄存器。放在相机任务里做，
- * 不额外增加 init 阻塞；校准期间先按原速出几帧，随后落到目标帧率。 */
+/* 相机每次 init/deinit/失败都从头校准；这些状态只归 cam_task 使用。 */
+static void reset_calib_state(void)
+{
+    s_fps_calibrated = false;
+    s_sensor_fps_ok = false;
+    s_sensor_fps_applied = 0;
+    s_base_fps = 0;
+    s_calib_started = false;
+    s_calib_frames = 0;
+    s_calib_settle = 0;
+    s_calib_start_ms = 0;
+    s_calib_last_grab_ms = 0;
+    s_calib_max_gap_ms = 0;
+    s_calib_retries = 0;
+    s_next_grab_ms = 0;
+}
+
+/* 先丢 init 后的若干帧让 AEC/AGC 收敛，再用随后 20 帧测传感器默认帧率，
+ * 然后改寄存器。放在相机任务里做，不额外增加 init 阻塞。
+ * 窗口内如果出现远超平均的长间隔（WiFi/httpd 长阻塞），基准会被拉低，
+ * 之后所有 VTS 换算都系统性偏快；这种情况丢弃窗口重测一次。 */
 static void calibrate_sensor_fps(uint32_t grab_ms)
 {
     if (s_fps_calibrated || !s_sensor_fps_ok) {
         return;
     }
-    /* 丢掉 init 后队列里的第一帧，避免陈旧帧把基准测高。 */
+    /* 丢掉 init 后队列里的第一帧，并给自动曝光/自动增益留收敛时间。 */
     if (!s_calib_started) {
         s_calib_started = true;
+        s_calib_settle = CAM_FPS_CALIB_SETTLE_FRAMES;
+        return;
+    }
+    if (s_calib_settle > 0) {
+        s_calib_settle--;
         return;
     }
     if (s_calib_frames == 0) {
         s_calib_start_ms = grab_ms;
+        s_calib_last_grab_ms = grab_ms;
+        s_calib_max_gap_ms = 0;
+    } else {
+        uint32_t gap = grab_ms - s_calib_last_grab_ms;
+        if (gap > s_calib_max_gap_ms) {
+            s_calib_max_gap_ms = gap;
+        }
+        s_calib_last_grab_ms = grab_ms;
     }
     s_calib_frames++;
     if (s_calib_frames < CAM_FPS_CALIB_FRAMES) {
@@ -265,6 +319,15 @@ static void calibrate_sensor_fps(uint32_t grab_ms)
     uint32_t elapsed = grab_ms - s_calib_start_ms;
     if (elapsed == 0) {
         s_calib_frames = 0; /* 时间戳还没走，下一帧重新量 */
+        return;
+    }
+    uint32_t avg_gap = elapsed / (s_calib_frames - 1u);
+    if (avg_gap != 0 && s_calib_retries == 0 &&
+        s_calib_max_gap_ms > avg_gap * CAM_FPS_CALIB_OUTLIER_FACTOR) {
+        s_calib_retries++;
+        s_calib_frames = 0;
+        ESP_LOGW(TAG, "fps calibration outlier %lu ms (avg %lu ms), retry",
+                 (unsigned long)s_calib_max_gap_ms, (unsigned long)avg_gap);
         return;
     }
     uint32_t base = (uint32_t)(s_calib_frames - 1) * 1000u / elapsed;
@@ -454,13 +517,7 @@ static void cam_task(void *arg)
         switch (action) {
         case ACT_DEINIT:
             (void)camera_drv_deinit();
-            s_fps_calibrated = false;
-            s_sensor_fps_ok = false;
-            s_sensor_fps_applied = 0;
-            s_base_fps = 0;
-            s_calib_started = false;
-            s_calib_frames = 0;
-            s_next_grab_ms = 0;
+            reset_calib_state();
             lock();
             set_idle_locked(idle_to_off ? CAM_OFF : CAM_IDLE);
             cam_rate_stream_stop(&s_rate, now_ms());
@@ -517,13 +574,7 @@ static void cam_task(void *arg)
                 s_fps_frames = 0;
                 s_last_frame_ms = 0;
                 s_init_requested = false; /* 本次 init 已满足发起它的请求 */
-                s_fps_calibrated = false;
-                s_calib_started = false;
-                s_calib_frames = 0;
-                s_calib_start_ms = 0;
-                s_sensor_fps_applied = 0;
-                s_next_grab_ms = 0;
-                s_base_fps = 0;
+                reset_calib_state();
                 s_sensor_fps_ok = camera_drv_fps_control_supported();
                 if (!s_sensor_fps_ok) {
                     ESP_LOGW(TAG, "sensor fps control unsupported, use grab pacing");
@@ -550,13 +601,7 @@ static void cam_task(void *arg)
                 s_init_requested = false;
                 s_preview_deadline = CAM_DEADLINE_NONE;
                 s_grace_deadline = CAM_DEADLINE_NONE;
-                s_fps_calibrated = false;
-                s_sensor_fps_ok = false;
-                s_sensor_fps_applied = 0;
-                s_base_fps = 0;
-                s_calib_started = false;
-                s_calib_frames = 0;
-                s_next_grab_ms = 0;
+                reset_calib_state();
                 ESP_LOGE(TAG, "camera state=fail; next stream/snapshot retries");
             }
             unlock();
@@ -593,13 +638,7 @@ static void cam_task(void *arg)
                     s_grace_deadline = CAM_DEADLINE_NONE;
                     cam_rate_stream_stop(&s_rate, now_ms());
                     unlock();
-                    s_fps_calibrated = false;
-                    s_sensor_fps_ok = false;
-                    s_sensor_fps_applied = 0;
-                    s_base_fps = 0;
-                    s_calib_started = false;
-                    s_calib_frames = 0;
-                    s_next_grab_ms = 0;
+                    reset_calib_state();
                 }
             }
             break;
@@ -729,6 +768,11 @@ bool bench_cam_stream_should_stop(void)
     bool stop = s_stop_stream;
     xSemaphoreGive(s_lock);
     return stop;
+}
+
+void bench_cam_set_frame_wait_task(TaskHandle_t task)
+{
+    s_frame_wait_task = task;
 }
 
 esp_err_t bench_cam_copy_latest(uint8_t *dst, size_t cap, size_t *len, uint32_t *gen)

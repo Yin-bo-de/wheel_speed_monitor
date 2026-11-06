@@ -18,6 +18,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "config_params.h"
 #include "telemetry.h"
@@ -61,6 +62,10 @@ bool bench_cam_stream_should_stop(void);
 /* 流任务上报一帧的实际发送耗时；控制器据此自动降/升采集帧率。
  * 只在流活跃时有意义，流结束会自动回到用户配置上限。 */
 void bench_cam_report_send_time(uint32_t send_ms);
+
+/* 流任务注册自己的任务句柄：发布任务拷进新帧后直接通知它，发送节奏跟随
+ * 传感器出帧，不再用固定毫秒节拍轮询。传 NULL 取消。 */
+void bench_cam_set_frame_wait_task(TaskHandle_t task);
 
 /* 把最新发布帧拷到调用方缓冲。没有帧或缓冲不足返回错误，不阻塞。 */
 esp_err_t bench_cam_copy_latest(uint8_t *dst, size_t cap, size_t *len, uint32_t *gen);
