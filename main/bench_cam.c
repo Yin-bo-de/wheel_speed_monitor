@@ -81,6 +81,7 @@ static uint32_t s_last_frame_ms;
 static float s_fps;
 static uint32_t s_fps_window_ms;
 static uint32_t s_fps_frames;
+static uint32_t s_fps_log_ms; /* 采集帧率日志节流：5 秒一条，别刷屏 */
 static uint32_t s_fail_count;
 static uint32_t s_big_frame_drops; /* 帧大于发布缓冲：限频打印，别刷日志 */
 
@@ -230,6 +231,10 @@ static bool alloc_pub_locked(uint32_t res)
 static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
 {
     bool published = false;
+    bool log_fps = false;
+    float fps_snapshot = 0.0f;
+    uint32_t target_snapshot = 0;
+    uint32_t cap_snapshot = 0;
     lock();
     /* 能拿到帧就说明传感器还在出数据，失败计数清零；帧太大只是发布缓冲
      * 不够，不该和"取帧超时"混成同一个故障。 */
@@ -251,6 +256,15 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
             s_fps = (float)s_fps_frames * 1000.0f / (float)elapsed;
             s_fps_window_ms = now;
             s_fps_frames = 0;
+            /* 采集侧实测。和 camstream 的 stream 日志对齐看：grab 低是采集，
+             * grab 正常而 send 低是网络。 */
+            if (now - s_fps_log_ms >= 5000) {
+                s_fps_log_ms = now;
+                log_fps = true;
+                fps_snapshot = s_fps;
+                target_snapshot = cam_rate_effective(&s_rate);
+                cap_snapshot = cam_rate_cap(&s_rate);
+            }
         }
     } else if (s_pub != NULL && frame->len > s_pub_cap) {
         if ((s_big_frame_drops++ % 60u) == 0) {
@@ -259,6 +273,12 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
         }
     }
     unlock();
+
+    if (log_fps) {
+        ESP_LOGI(TAG, "grab fps=%.1f target=%lu cap=%lu pacing=%s",
+                 fps_snapshot, (unsigned long)target_snapshot,
+                 (unsigned long)cap_snapshot, s_sensor_fps_ok ? "sensor" : "grab");
+    }
 
     /* 通知放在锁外：发送侧不在锁内做任何事，这里也不持锁做调度操作。
      * 没有流时通知会累积计数，流任务开始发送前会清一次。 */

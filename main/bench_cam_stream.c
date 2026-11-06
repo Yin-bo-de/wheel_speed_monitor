@@ -179,6 +179,12 @@ static void cam_stream_task(void *arg)
         uint32_t next_send_ms = now;
         uint32_t last_cfg_ms = now;
 
+        /* 发送侧实测：5 秒窗口，和 benchcam 的 grab 日志对齐判断瓶颈。 */
+        uint32_t stat_frames = 0;
+        uint64_t stat_send_us = 0;
+        uint64_t stat_bytes = 0;
+        uint32_t stat_start_ms = now;
+
         /* 没有流的时候发布任务也在发通知，计数可能累积；
          * 清一次，从下一个新帧开始算。 */
         (void)ulTaskNotifyTake(pdTRUE, 0);
@@ -258,6 +264,27 @@ static void cam_stream_task(void *arg)
             last_send_ms = now;
             frames++;
             bytes += (uint32_t)len;
+
+            stat_frames++;
+            stat_send_us += (uint64_t)send_ms * 1000u;
+            stat_bytes += len;
+            if (now - stat_start_ms >= 5000) {
+                uint32_t elapsed = now - stat_start_ms;
+                uint32_t avg_send_ms = (uint32_t)(stat_send_us / 1000u / stat_frames);
+                uint32_t avg_frame = (uint32_t)(stat_bytes / stat_frames);
+                bench_cam_get_status(&st);
+                ESP_LOGI(TAG,
+                         "stream 5s: send=%.1ffps grab=%.1ffps target=%u/%u "
+                         "avg_send=%lums frame=%luB",
+                         stat_frames * 1000.0f / (float)elapsed, st.fps,
+                         (unsigned)st.fps_eff, (unsigned)st.fps_cap,
+                         (unsigned long)avg_send_ms, (unsigned long)avg_frame);
+                stat_frames = 0;
+                stat_send_us = 0;
+                stat_bytes = 0;
+                stat_start_ms = now;
+            }
+
             uint32_t interval = 1000u / fps_send;
             if (interval == 0) {
                 interval = 1;
