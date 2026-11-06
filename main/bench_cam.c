@@ -63,6 +63,9 @@ static uint32_t s_applied_res = CFG_CAM_RES_QVGA;
 static uint32_t s_applied_quality = 12;
 static uint32_t s_cached_overlay = CFG_CAM_OVERLAY_ALL;
 static cam_rate_t s_rate;
+/* 用户在设置页配的上限。控制器实际用的上限还要和实测 base 取小，
+ * 否则目标会抬到传感器达不到的帧率。 */
+static uint32_t s_user_fps_cap = CFG_CAM_FPS_MAX;
 
 /* 流任务句柄：发布新帧后直接通知它，发送节奏锁定到传感器出帧。
  * 只由流任务在启动时写一次，指针读写是原子的，不需要加锁。 */
@@ -129,6 +132,17 @@ static void unlock(void)
 static bool deadline_due(uint32_t now, uint32_t deadline)
 {
     return deadline != CAM_DEADLINE_NONE && (int32_t)(now - deadline) >= 0;
+}
+
+/* 调用时 s_lock 已持有。上限取用户配置和传感器实测基准的较小值：
+ * 目标高于 base 时驱动只会保持基准，控制器再往上抬没有意义。 */
+static void apply_rate_cap_locked(void)
+{
+    uint32_t cap = s_user_fps_cap;
+    if (s_base_fps != 0 && s_base_fps < cap) {
+        cap = s_base_fps;
+    }
+    cam_rate_set_cap(&s_rate, cap);
 }
 
 static const char *state_str(cam_state_t st)
@@ -301,6 +315,10 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
                         s_base_fps = observed;
                         s_base_last_ms = now;
                         s_base_dirty = true;
+                        apply_rate_cap_locked();
+                        /* 上限可能刚被压低，日志按夹后的值打印 */
+                        target_snapshot = cam_rate_effective(&s_rate);
+                        cap_snapshot = cam_rate_cap(&s_rate);
                         log_base = true;
                     }
                 }
@@ -393,6 +411,7 @@ static void finish_calib(uint32_t grab_ms, bool was_recal)
 
     uint32_t target;
     lock();
+    apply_rate_cap_locked();
     target = cam_rate_effective(&s_rate);
     unlock();
 
@@ -516,9 +535,13 @@ static void cam_task(void *arg)
 
         if (have_cfg) {
             s_cached_overlay = cfg_overlay;
-            if (cfg_fps_cap != cam_rate_cap(&s_rate)) {
-                cam_rate_set_cap(&s_rate, cfg_fps_cap);
-                ESP_LOGI(TAG, "fps cap -> %lu", (unsigned long)cam_rate_cap(&s_rate));
+            if (cfg_fps_cap != s_user_fps_cap) {
+                s_user_fps_cap = cfg_fps_cap;
+                apply_rate_cap_locked();
+                ESP_LOGI(TAG, "fps cap -> %lu (user %lu, base %lu)",
+                         (unsigned long)cam_rate_cap(&s_rate),
+                         (unsigned long)s_user_fps_cap,
+                         (unsigned long)s_base_fps);
             }
 
             if (cfg_policy != s_applied_policy) {
@@ -532,7 +555,7 @@ static void cam_task(void *arg)
                 } else if (cfg_policy == CFG_CAM_POLICY_ALWAYS) {
                     s_preview_deadline = CAM_DEADLINE_NONE;
                     s_grace_deadline = CAM_DEADLINE_NONE;
-                    cam_rate_set_cap(&s_rate, cam_rate_cap(&s_rate));
+                    apply_rate_cap_locked();
                     if (s_state != CAM_ON && s_state != CAM_INIT) {
                         s_init_requested = true;
                     }
@@ -660,8 +683,8 @@ static void cam_task(void *arg)
             lock();
             set_idle_locked(idle_to_off ? CAM_OFF : CAM_IDLE);
             cam_rate_stream_stop(&s_rate, now_ms());
-            /* 新的相机会话（下一次 init）从用户上限重新起步。 */
-            cam_rate_set_cap(&s_rate, cam_rate_cap(&s_rate));
+            /* 新的相机会话（下一次 init）从用户上限重新起步，校准后再夹到 base。 */
+            apply_rate_cap_locked();
             if (idle_to_off) {
                 ESP_LOGI(TAG, "camera off");
             } else {
@@ -678,8 +701,11 @@ static void cam_task(void *arg)
                 s_sensor_fps_ok = false;
                 s_next_grab_ms = 0;
             } else {
-                ESP_LOGI(TAG, "sensor fps -> %lu (base %lu)",
-                         (unsigned long)fps_to_apply, (unsigned long)s_base_fps);
+                /* 目标高于 base 时驱动保持基准，日志如实写实际生效值。 */
+                uint32_t applied = (fps_to_apply < s_base_fps) ? fps_to_apply : s_base_fps;
+                ESP_LOGI(TAG, "sensor fps: request %lu, effective %lu (base %lu)",
+                         (unsigned long)fps_to_apply, (unsigned long)applied,
+                         (unsigned long)s_base_fps);
             }
             break;
         }
@@ -806,6 +832,7 @@ esp_err_t bench_cam_start(cfg_params_t *cfg, SemaphoreHandle_t cfg_mutex)
     s_applied_policy = cfg->cam_policy;
     s_applied_res = cfg->cam_res;
     s_applied_quality = cfg->cam_quality;
+    s_user_fps_cap = cfg->cam_fps_cap;
     cam_rate_init(&s_rate, cfg->cam_fps_cap);
     s_cached_overlay = cfg->overlay_mask;
     s_state = (cfg->cam_policy == CFG_CAM_POLICY_OFF) ? CAM_OFF : CAM_IDLE;
@@ -870,10 +897,10 @@ void bench_cam_stream_release(void)
     s_stream_active = false;
     /* 断流后保留降速结果：网络可能还没恢复，下一次请求先按低帧率起步，
      * 由 cam_rate 的 recovery 慢慢升回去；相机 deinit 时才恢复用户上限。
-     * always 没有流时不存在网络压力，直接回到用户上限。 */
+     * always 没有流时不存在网络压力，直接回到当前上限。 */
     cam_rate_stream_stop(&s_rate, now_ms());
     if (s_applied_policy == CFG_CAM_POLICY_ALWAYS) {
-        cam_rate_set_cap(&s_rate, cam_rate_cap(&s_rate));
+        apply_rate_cap_locked();
     }
     if (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_state == CAM_ON) {
         s_grace_deadline = now_ms() + CAM_STREAM_GRACE_MS;
