@@ -82,6 +82,12 @@ void bench_cam_set_preview(bool active);
 /* 最后一个 WS 客户端断开：按预览不可见处理，起 30 秒计时。 */
 void bench_cam_on_ws_disconnect(void);
 
+/* OTA 升级前调用：停流并让发布任务立即 deinit 相机，最多等 2 秒。
+ * flash 写入会停 cache，相机 DMA 和 MJPEG 发送继续跑只会互相拖。 */
+void bench_cam_suspend_for_ota(void);
+/* 升级失败后调用：按当前策略和预览状态恢复相机。 */
+void bench_cam_resume_after_ota(void);
+
 /* sys.cam 快照，ws_push_task 每帧调用。 */
 void bench_cam_get_status(telem_cam_status_t *out);
 

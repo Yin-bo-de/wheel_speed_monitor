@@ -67,6 +67,8 @@ static bool s_stream_active;
 static bool s_stop_stream;
 static bool s_init_requested;
 static bool s_reinit_requested;
+/* OTA 挂起：httpd 任务写，cam_task 每轮在锁内读取。 */
+static bool s_ota_suspend;
 static uint32_t s_preview_deadline = CAM_DEADLINE_NONE;
 static uint32_t s_grace_deadline = CAM_DEADLINE_NONE;
 
@@ -449,6 +451,23 @@ static void cam_task(void *arg)
             }
         }
 
+        /* OTA 期间压住一切相机启动。升级在上传 handler 里同步跑，
+         * flash 写会停 cache，相机 DMA 和 MJPEG 发送都会跟着卡。 */
+        if (s_ota_suspend) {
+            s_init_requested = false;
+            s_reinit_requested = false;
+            s_stop_stream = true;
+            s_preview_deadline = CAM_DEADLINE_NONE;
+            s_grace_deadline = CAM_DEADLINE_NONE;
+            if (action == ACT_INIT) {
+                action = ACT_NONE; /* 这一轮不要启动相机 */
+            }
+            if (s_state != CAM_OFF) {
+                action = ACT_DEINIT;
+                idle_to_off = true;
+            }
+        }
+
         if (action == ACT_NONE && s_applied_policy == CFG_CAM_POLICY_OFF &&
             s_state != CAM_OFF) {
             action = ACT_DEINIT;
@@ -698,6 +717,9 @@ bench_cam_stream_result_t bench_cam_stream_acquire(void)
     bench_cam_stream_result_t result = BENCH_CAM_STREAM_OK;
     if (s_applied_policy == CFG_CAM_POLICY_OFF) {
         result = BENCH_CAM_STREAM_OFF;
+    } else if (s_ota_suspend) {
+        /* 升级中相机正在 deinit，新的流请求不能把它拉起来 */
+        result = BENCH_CAM_STREAM_BUSY;
     } else if (s_stream_active) {
         result = BENCH_CAM_STREAM_BUSY;
     } else {
@@ -832,6 +854,12 @@ bench_cam_snap_result_t bench_cam_snapshot(uint8_t **out, size_t *len)
         return BENCH_CAM_SNAP_OFF;
     }
 
+    if (s_ota_suspend) {
+        /* 升级中不启动相机，也不接受新快照 */
+        xSemaphoreGive(s_lock);
+        return BENCH_CAM_SNAP_WARMING;
+    }
+
     if (s_state != CAM_ON) {
         bench_cam_snap_result_t r = (s_state == CAM_FAIL) ? BENCH_CAM_SNAP_FAIL
                                                           : BENCH_CAM_SNAP_WARMING;
@@ -891,6 +919,44 @@ void bench_cam_set_preview(bool active)
 void bench_cam_on_ws_disconnect(void)
 {
     bench_cam_set_preview(false);
+}
+
+void bench_cam_suspend_for_ota(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    lock();
+    s_ota_suspend = true;
+    s_stop_stream = true;
+    s_init_requested = false;
+    s_reinit_requested = false;
+    unlock();
+
+    /* cam_task 空闲轮询 20ms；等它真正 deinit 完再开始写 flash。 */
+    for (int i = 0; i < 100; i++) {
+        if (bench_cam_state() == BENCH_CAM_STATE_OFF) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    ESP_LOGW(TAG, "camera still busy after 2s, OTA continues");
+}
+
+void bench_cam_resume_after_ota(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    lock();
+    s_ota_suspend = false;
+    if (s_applied_policy == CFG_CAM_POLICY_ALWAYS ||
+        (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_preview_active)) {
+        s_init_requested = true;
+    } else if (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_state == CAM_OFF) {
+        s_state = CAM_IDLE;
+    }
+    unlock();
 }
 
 void bench_cam_get_status(telem_cam_status_t *out)
