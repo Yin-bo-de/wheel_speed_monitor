@@ -114,6 +114,21 @@
     pointer-events:none; }
   select { width:100%; background:#222; color:var(--text); border:1px solid var(--border);
     border-radius:4px; padding:4px 6px; }
+
+  /* ---- 固件升级 ---- */
+  .ota-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; font-size:12px; }
+  .ota-file { font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
+  .ota-bar { position:relative; height:8px; background:#222; border-radius:4px; margin-top:8px; overflow:hidden; }
+  .ota-bar i { position:absolute; top:0; bottom:0; left:0; width:0; background:#4fc3f7; transition:width .2s; }
+  .ota-msg { margin-top:6px; font-size:12px; color:var(--dim); }
+  .ota-msg.err { color:#ff7f7f; }
+  .ota-msg.ok { color:#7fdc7f; }
+  .ota-msg.warn { color:#ffb74d; }
+  .ota-confirm { display:none; margin-top:8px; padding:8px; border:1px solid #5a4a1e; border-radius:6px; background:#2a2416; }
+  .ota-confirm.show { display:block; }
+  .ota-confirm .row { margin-bottom:8px; color:var(--text); }
+  .ota-danger { border-color:#7f3b3b; }
+  #ota-file { font-size:11px; color:var(--dim); max-width:100%; }
 </style>
 </head>
 <body>
@@ -327,6 +342,30 @@
       30 秒，超时才停。改分辨率/画质时如果正在预览，相机会重启约 1–2 秒。常开是调试入口，
       发热和功耗更高。SVGA 只建议观察用。</p>
   </div>
+
+  <div class="card" style="margin-top:12px" id="ota-card">
+    <h2>固件升级 <span class="note">(无线 OTA，升级时请勿断电)</span></h2>
+    <div class="row"><span>当前版本</span><b id="ota-cur">—</b></div>
+    <div class="row"><span>运行分区</span><b id="ota-part">—</b></div>
+    <div class="row"><span>另一分区</span><b id="ota-other">—</b></div>
+    <div class="ota-row">
+      <input type="file" id="ota-file" accept=".bin,application/octet-stream">
+      <span class="ota-file" id="ota-file-name">未选择文件</span>
+    </div>
+    <div class="ota-row">
+      <button id="ota-start" class="ota-danger" disabled>开始升级</button>
+      <button id="ota-rollback" disabled>回退到另一版本</button>
+    </div>
+    <div class="ota-confirm" id="ota-confirm">
+      <div class="row"><span id="ota-confirm-text">—</span></div>
+      <button id="ota-confirm-yes">确认</button>
+      <button id="ota-confirm-no">取消</button>
+    </div>
+    <div class="ota-bar" id="ota-bar-wrap" hidden><i id="ota-bar"></i></div>
+    <div class="ota-msg" id="ota-msg"></div>
+    <p class="hint">上传 build/wheel_speed_monitor.bin。第一次启用 OTA 需要插 USB 烧写分区表，
+      之后都从这里升级。设备重启期间页面会等待并自动刷新。</p>
+  </div>
 </section>
 </main>
 
@@ -454,6 +493,7 @@ function showTab(name) {
   const prev = activeTab;
   if (name !== "monitor" && camIsFullscreen()) camExitFullscreen();
   activeTab = name;
+  if (name === "settings") otaRefresh();
   document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   /* 监测页不能设 hidden（display:none 会让浏览器停读 MJPEG）：切走时只把它
    * 移出布局并隐藏可见性，<img> 仍在渲染树里，服务端的 30 秒保持才有意义。 */
@@ -1170,15 +1210,233 @@ function connectWS() {
   ws = new WebSocket(WS_URL);
   ws.onopen = () => {
     $("status-dot").className = "ok";
-    $("status-text").textContent = "已连接";
+    $("status-text").textContent = otaInProgress ? "设备重启中，等待重新连接…" : "已连接";
     reconnect = 0;
     /* 断线重连后按当前 tab 补发预览状态，避免服务端还停在不可见计时里。 */
     camSendPreview(activeTab === "monitor" && !document.hidden);
   };
   ws.onmessage = e => { try { lastFrame = JSON.parse(e.data); applyFrame(lastFrame); } catch (_) {} };
-  ws.onclose = () => { $("status-dot").className = "warn"; $("status-text").textContent = "断开，重连中…"; setTimeout(connectWS, Math.min(1000 * ++reconnect, 5000)); };
+  ws.onclose = () => { $("status-dot").className = "warn"; $("status-text").textContent = otaInProgress ? "设备重启中，等待重新连接…" : "断开，重连中…"; setTimeout(connectWS, Math.min(1000 * ++reconnect, 5000)); };
   ws.onerror = () => ws.close();
 }
+/* ---- 固件升级 ---- */
+let otaInProgress = false;
+let otaInfo = null;
+let otaConfirmKind = null;
+
+function otaMsg(text, cls) {
+  const el = $("ota-msg");
+  el.textContent = text || "";
+  el.className = "ota-msg" + (cls ? " " + cls : "");
+}
+
+function otaRenderInfo(info) {
+  otaInfo = info;
+  $("ota-cur").textContent = (info.version ? "v" + info.version : "—") +
+    (info.built ? " · 编译于 " + info.built : "");
+  $("ota-part").textContent = info.running || "—";
+  $("ota-other").textContent = info.other_version
+    ? "v" + info.other_version + " (" + (info.other_state || "unknown") + ")"
+    : "空";
+  const canRollback = !otaInProgress && info.other_version && info.other_state === "valid";
+  $("ota-rollback").disabled = !canRollback;
+  if (info.other_state === "aborted") {
+    otaMsg("上次升级的固件启动失败，设备已自动回滚到当前版本。", "warn");
+  }
+  $("ota-card").classList.toggle("disabled", otaInProgress || info.busy);
+}
+
+async function otaFetchInfo() {
+  const r = await fetch("/api/ota/info", { cache: "no-store" });
+  if (!r.ok) throw new Error("info " + r.status);
+  const info = await r.json();
+  otaRenderInfo(info);
+  return info;
+}
+
+function otaRefresh() {
+  otaFetchInfo().catch(() => {});
+}
+
+/* 解析 ESP-IDF 镜像头里的 esp_app_desc_t，只用于上传前提示。
+ * 最终校验在设备端 esp_ota_end。 */
+async function otaParseFile(file) {
+  if (file.size > 4 * 1024 * 1024) throw new Error("文件超过 4MB");
+  const head = new Uint8Array(await file.slice(0, 0x120).arrayBuffer());
+  if (head.length < 0x120 || head[0] !== 0xE9) throw new Error("不是 ESP-IDF 固件");
+  const dv = new DataView(head.buffer);
+  if (dv.getUint32(0x20, true) !== 0xABCD5432) throw new Error("不是 ESP-IDF 固件");
+  const dec = new TextDecoder();
+  const cstr = (off, len) => dec.decode(head.slice(off, off + len)).replace(/\0.*$/, "").trim();
+  return {
+    version: cstr(0x30, 32),
+    built: cstr(0x70, 16) + " " + cstr(0x80, 16),
+  };
+}
+
+function otaVersionCmp(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  if (pa.some(Number.isNaN) || pb.some(Number.isNaN)) return null;
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+async function otaOnFileChange() {
+  const f = $("ota-file").files[0];
+  $("ota-start").disabled = true;
+  $("ota-file-name").textContent = "未选择文件";
+  $("ota-file").dataset.meta = "";
+  if (!f) return;
+  try {
+    const meta = await otaParseFile(f);
+    const cmp = otaInfo ? otaVersionCmp(meta.version, otaInfo.version) : null;
+    const dir = cmp === null ? "版本不同" : cmp > 0 ? "升级" : cmp < 0 ? "降级" : "版本相同";
+    $("ota-file-name").textContent =
+      `${f.name} · ${Math.round(f.size / 1024)} KB · v${meta.version || "?"} · ${dir}`;
+    $("ota-file").dataset.meta = JSON.stringify(meta);
+    $("ota-start").disabled = otaInProgress;
+  } catch (e) {
+    $("ota-file-name").textContent = f.name + " · " + e.message;
+    otaMsg(e.message, "err");
+  }
+}
+
+function otaShowConfirm(kind, text) {
+  otaConfirmKind = kind;
+  $("ota-confirm-text").textContent = text;
+  $("ota-confirm").classList.add("show");
+}
+
+function otaCancelConfirm() {
+  otaConfirmKind = null;
+  $("ota-confirm").classList.remove("show");
+}
+
+function otaStartClick() {
+  const f = $("ota-file").files[0];
+  if (!f || !otaInfo || otaInProgress) return;
+  const meta = JSON.parse($("ota-file").dataset.meta || "{}");
+  const cmp = otaVersionCmp(meta.version, otaInfo.version);
+  const dir = cmp === null ? "版本不同" : cmp > 0 ? "升级" : cmp < 0 ? "降级" : "版本相同";
+  otaShowConfirm("upload",
+    `确认${dir}：v${otaInfo.version} → v${meta.version || "?"}？升级过程中不能断电。`);
+}
+
+function otaSetBusy(on) {
+  otaInProgress = on;
+  $("ota-start").disabled = on || !$("ota-file").files[0];
+  $("ota-rollback").disabled = true;
+  $("ota-card").classList.toggle("disabled", on);
+  if (on) {
+    camStopStream();
+    $("ota-bar-wrap").hidden = false;
+    $("ota-bar").style.width = "0%";
+    $("status-dot").className = "warn";
+    $("status-text").textContent = "正在升级固件…";
+  }
+}
+
+function otaUpload() {
+  const f = $("ota-file").files[0];
+  if (!f) return;
+  otaSetBusy(true);
+  otaMsg("正在上传，请勿断电…");
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/ota/upload");
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.timeout = 300000;
+  let lastPct = 0;
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    lastPct = Math.round(e.loaded * 100 / e.total);
+    $("ota-bar").style.width = lastPct + "%";
+    $("status-text").textContent = "正在升级固件 " + lastPct + "%";
+    otaMsg("正在写入 " + lastPct + "%，请勿断电…");
+  };
+  xhr.onload = () => {
+    let r = null;
+    try { r = JSON.parse(xhr.responseText); } catch (_) {}
+    if (xhr.status >= 200 && xhr.status < 300 && r && r.ok) {
+      otaWaitReboot(r);
+    } else {
+      otaSetBusy(false);
+      otaMsg(r && r.error ? "升级失败：" + r.error : "升级失败（HTTP " + xhr.status + "）", "err");
+      otaRefresh();
+      camSyncView();
+    }
+  };
+  xhr.onerror = xhr.ontimeout = () => {
+    /* 设备重启会掐断连接：进度到 100% 按重启等待，否则是真失败。 */
+    if (lastPct >= 100) otaWaitReboot(null);
+    else {
+      otaSetBusy(false);
+      otaMsg("上传中断，设备仍是旧固件，可以重试。", "err");
+      camSyncView();
+    }
+  };
+  xhr.send(f);
+}
+
+function otaFetchInfoWithTimeout() {
+  return new Promise((resolve, reject) => {
+    const ctl = new AbortController();
+    const t = setTimeout(() => { ctl.abort(); reject(new Error("timeout")); }, 1500);
+    fetch("/api/ota/info", { cache: "no-store", signal: ctl.signal })
+      .then(r => { clearTimeout(t); if (!r.ok) throw new Error("http"); return r.json(); })
+      .then(resolve)
+      .catch(e => { clearTimeout(t); reject(e); });
+  });
+}
+
+async function otaWaitReboot(result) {
+  $("ota-bar").style.width = "100%";
+  otaMsg(result && result.version
+    ? `写入完成（v${result.version}），设备重启中…`
+    : "设备重启中，等待重新连接…", "ok");
+  $("status-text").textContent = "设备重启中，等待重新连接…";
+  await new Promise(r => setTimeout(r, 3000));
+  for (let i = 0; i < 30; i++) {
+    try {
+      const info = await otaFetchInfoWithTimeout();
+      if (!info.busy) {
+        otaMsg("升级完成，页面即将刷新。", "ok");
+        setTimeout(() => location.reload(), 800);
+        return;
+      }
+    } catch (_) {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  otaSetBusy(false);
+  otaMsg("设备 30 秒内没有回来。检查是否断电，或手动连回 wheel-bench 热点后刷新页面。", "err");
+  otaRefresh();
+}
+
+function otaRollback() {
+  otaSetBusy(true);
+  otaMsg("正在切换启动分区…");
+  fetch("/api/ota/rollback", { method: "POST" })
+    .then(async r => ({ status: r.status, body: await r.json().catch(() => null) }))
+    .then(({ status, body }) => {
+      if (status >= 200 && status < 300 && body && body.ok) otaWaitReboot(body);
+      else {
+        otaSetBusy(false);
+        otaMsg("回退失败：" + ((body && body.error) || ("HTTP " + status)), "err");
+        otaRefresh();
+      }
+    })
+    .catch(() => otaWaitReboot(null));
+}
+
+function otaRollbackClick() {
+  if (!otaInfo || !otaInfo.other_version || otaInProgress) return;
+  otaShowConfirm("rollback",
+    `确认回退到 v${otaInfo.other_version}？设备将重启。`);
+}
+
 function poll() { fetch(API).then(r => r.json()).then(f => { if (!lastFrame) applyFrame(f); }).catch(() => {}); }
 
 function send(cmd) {
@@ -1277,6 +1535,18 @@ window.addEventListener("DOMContentLoaded", () => {
   camUpdateRotationUi();
   $("cam-rot-left").onclick = () => camSetRotation(camRotation - 90);
   $("cam-rot-right").onclick = () => camSetRotation(camRotation + 90);
+
+  $("ota-file").addEventListener("change", otaOnFileChange);
+  $("ota-start").onclick = otaStartClick;
+  $("ota-rollback").onclick = otaRollbackClick;
+  $("ota-confirm-yes").onclick = () => {
+    const kind = otaConfirmKind;
+    otaCancelConfirm();
+    if (kind === "upload") otaUpload();
+    else if (kind === "rollback") otaRollback();
+  };
+  $("ota-confirm-no").onclick = otaCancelConfirm;
+  otaRefresh();
 
   $("cam-view").addEventListener("load", camUpdateViewGeometry);
   $("cam-view").addEventListener("error", () => {
