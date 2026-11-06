@@ -25,3 +25,14 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_HTTPD_WS_SUPPORT=y
 # 注：httpd 栈无对应 Kconfig 符号（原 CONFIG_HTTPD_STACK_SIZE 在 IDF 5.5 不存在），
 # 实际由 httpd_config_t.stack_size 设置（main/bench_http_server.c）。
+
+# ---- 摄像头（Freenove FNK0085，N16R8 = 16MB Flash + 8MB 八线 PSRAM） ----
+# 相机帧缓冲走 CAMERA_FB_IN_PSRAM；不开 PSRAM 时 esp_camera_init 直接失败。
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# esp32-camera 的 DMA 任务默认钉 Core0、优先级 23，会抢 sampler_task（22）。
+# 挪到 Core1，和 httpd/流任务同核，Core0 的 50ms 控制节拍不受影响。
+CONFIG_CAMERA_CORE1=y

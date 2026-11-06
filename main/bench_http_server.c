@@ -9,6 +9,8 @@
 #include "esp_log.h"
 #include "esp_system.h"
 
+#include "bench_cam.h"
+#include "bench_cam_stream.h"
 #include "bench_http_server.h"
 #include "config_store.h"
 #include "wheel_config.h"
@@ -26,7 +28,7 @@ static bench_server_ctx_t s_ctx;
 static httpd_handle_t s_server_handle; /* 广播时直接用，不动态获取 */
 
 /* 最新遥测帧快照（ws_push_task 写入；/api/status 读取） */
-static char s_last_frame[2048];
+static char s_last_frame[3072];
 static size_t s_last_frame_len;
 static uint32_t s_last_seq;
 static SemaphoreHandle_t s_frame_mutex;
@@ -55,7 +57,7 @@ static esp_err_t handle_index(httpd_req_t *req)
 
 static esp_err_t handle_api_status(httpd_req_t *req)
 {
-    char buf[2048];
+    char buf[3072];
     size_t len = 0;
     uint32_t seq = 0;
     if (s_frame_mutex != NULL && xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -97,16 +99,25 @@ static void ws_client_unregister(int fd)
     if (xSemaphoreTake(s_clients_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return;
     }
+    bool any_left = false;
     for (int i = 0; i < WS_CLIENT_MAX; i++) {
         if (s_ws_clients[i] == fd) {
             s_ws_clients[i] = 0;
-            break;
+        }
+        if (s_ws_clients[i] != 0) {
+            any_left = true;
         }
     }
     xSemaphoreGive(s_clients_mutex);
     /* 断开此前是静默的：页面掉线后只表现为"设置点了没反应"，日志里
      * 看不出连接何时掉的，排查只能靠猜。留一行好对上时间线。 */
     ESP_LOGW(TAG, "WS client disconnected fd=%d", fd);
+
+    /* 最后一个控制页面掉线：按预览不可见处理，开始 30 秒计时。
+     * 多页面时只要还有一个 WS 在，就不动相机状态。 */
+    if (!any_left) {
+        bench_cam_on_ws_disconnect();
+    }
 }
 
 /* ---- 命令处理（在 httpd 上下文） ---- */
@@ -127,6 +138,9 @@ static esp_err_t handle_set_cfg(const char *payload)
 
     cfg_params_t next = *cfg;
     bool changed = false;
+    /* 只有轮速相关字段变了才重铺采集器基准；相机/舵机/遥控配置不该
+     * 顺手把四轮基线清一遍，否则点一下叠加勾选就会闪一下转速。 */
+    bool wheel_cfg_changed = false;
 
     cJSON *j;
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "magnets"))) {
@@ -138,6 +152,7 @@ static esp_err_t handle_set_cfg(const char *payload)
                 goto done;
             }
             changed = true;
+            wheel_cfg_changed = true;
         }
     }
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "diam_mm"))) {
@@ -149,6 +164,7 @@ static esp_err_t handle_set_cfg(const char *payload)
                 goto done;
             }
             changed = true;
+            wheel_cfg_changed = true;
         }
     }
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "alpha"))) {
@@ -160,6 +176,7 @@ static esp_err_t handle_set_cfg(const char *payload)
                 goto done;
             }
             changed = true;
+            wheel_cfg_changed = true;
         }
     }
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "en"))) {
@@ -173,6 +190,7 @@ static esp_err_t handle_set_cfg(const char *payload)
                 }
             }
             changed = true;
+            wheel_cfg_changed = true;
         }
     }
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "debounce_ms"))) {
@@ -184,12 +202,14 @@ static esp_err_t handle_set_cfg(const char *payload)
                 goto done;
             }
             changed = true;
+            wheel_cfg_changed = true;
         }
     }
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "sim"))) {
         if (cJSON_IsBool(j)) {
             next.sim_on = cJSON_IsTrue(j);
             changed = true;
+            wheel_cfg_changed = true;
         }
     }
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "sim_rpm"))) {
@@ -203,6 +223,7 @@ static esp_err_t handle_set_cfg(const char *payload)
                 }
             }
             changed = true;
+            wheel_cfg_changed = true;
         }
     }
 
@@ -318,6 +339,53 @@ static esp_err_t handle_set_cfg(const char *payload)
     }
     TRY_U32_ARRAY("rc_sim_us", rc_sim_us, CFG_RC_CH_COUNT);
 
+    /* ---- v5：摄像头 ----
+     * 策略和分辨率用可读字符串传，与 servo_mode 同一套命令行习惯；
+     * 画质/帧率/叠加位图是数字。任一字段非法整条命令拒绝。 */
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "cam_policy")) != NULL &&
+        j->valuestring != NULL) {
+        if (strcmp(j->valuestring, "off") == 0) {
+            next.cam_policy = CFG_CAM_POLICY_OFF;
+        } else if (strcmp(j->valuestring, "on_demand") == 0) {
+            next.cam_policy = CFG_CAM_POLICY_ON_DEMAND;
+        } else if (strcmp(j->valuestring, "always") == 0) {
+            next.cam_policy = CFG_CAM_POLICY_ALWAYS;
+        } else {
+            err_msg = "cam_policy invalid";
+            result = ESP_ERR_INVALID_ARG;
+            goto done;
+        }
+        if (cfg_params_validate(&next, "cam_policy") != ESP_OK) {
+            err_msg = "cam_policy out of range";
+            result = ESP_ERR_INVALID_ARG;
+            goto done;
+        }
+        changed = true;
+    }
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "cam_res")) != NULL &&
+        j->valuestring != NULL) {
+        if (strcmp(j->valuestring, "qvga") == 0) {
+            next.cam_res = CFG_CAM_RES_QVGA;
+        } else if (strcmp(j->valuestring, "vga") == 0) {
+            next.cam_res = CFG_CAM_RES_VGA;
+        } else if (strcmp(j->valuestring, "svga") == 0) {
+            next.cam_res = CFG_CAM_RES_SVGA;
+        } else {
+            err_msg = "cam_res invalid";
+            result = ESP_ERR_INVALID_ARG;
+            goto done;
+        }
+        if (cfg_params_validate(&next, "cam_res") != ESP_OK) {
+            err_msg = "cam_res out of range";
+            result = ESP_ERR_INVALID_ARG;
+            goto done;
+        }
+        changed = true;
+    }
+    TRY_U32("cam_quality", cam_quality);
+    TRY_U32("cam_fps_cap", cam_fps_cap);
+    TRY_U32("overlay_mask", overlay_mask);
+
 #undef TRY_U32
 #undef TRY_F32
 #undef TRY_BOOLS
@@ -326,7 +394,9 @@ static esp_err_t handle_set_cfg(const char *payload)
     if (changed) {
         *cfg = next;
         config_store_save(cfg);
-        wheel_bench_apply_config(cfg); /* main 层应用采集器配置 */
+        if (wheel_cfg_changed) {
+            wheel_bench_apply_config(cfg); /* main 层应用采集器配置 */
+        }
         (void)WHEEL_SAMPLE_MS;
     }
 
@@ -396,6 +466,12 @@ static esp_err_t ws_handler(httpd_req_t *req)
             handle_set_cfg(payload);
         } else if (strcmp(jtype->valuestring, "reset_counts") == 0) {
             handle_reset_counts();
+        } else if (strcmp(jtype->valuestring, "cam_preview") == 0) {
+            /* 只改运行时预览状态，不写 NVS；相机启动与否由流/快照请求决定。 */
+            cJSON *ja = cJSON_GetObjectItemCaseSensitive(root, "active");
+            if (cJSON_IsBool(ja)) {
+                bench_cam_set_preview(cJSON_IsTrue(ja));
+            }
         } else if (strcmp(jtype->valuestring, "get_cfg") == 0) {
             /* cfg 由遥测帧携带，无需专门回包 */
         }
@@ -408,10 +484,12 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
 void bench_http_server_broadcast(const char *frame, size_t len, uint32_t seq)
 {
-    /* 更新最新帧快照（供 /api/status） */
+    /* 更新最新帧快照（供 /api/status）。帧缓冲扩容到 3072 后仍留一道
+     * 边界检查：将来采集器再长字段，也不会把静态快照写穿。 */
+    size_t copy_len = len < sizeof(s_last_frame) ? len : sizeof(s_last_frame);
     if (s_frame_mutex != NULL && xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-        memcpy(s_last_frame, frame, len);
-        s_last_frame_len = len;
+        memcpy(s_last_frame, frame, copy_len);
+        s_last_frame_len = copy_len;
         s_last_seq = seq;
         xSemaphoreGive(s_frame_mutex);
     }
@@ -467,6 +545,10 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = WHEEL_HTTPD_STACK;
     cfg.core_id = WHEEL_HTTPD_CORE;
+    /* 4 个 WS + 1 个 MJPEG + 页面/快照/临时连接；默认 7 在满员时会把
+     * 新连接挤掉，lwIP 侧已经给了 16 个 socket。 */
+    cfg.max_open_sockets = 10;
+    cfg.send_wait_timeout = 5;
     cfg.lru_purge_enable = true;
     cfg.uri_match_fn = httpd_uri_match_wildcard;
 
@@ -496,6 +578,9 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
     uri.handler = ws_handler;
     uri.is_websocket = true;
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(hd, &uri), TAG, "err");
+
+    /* /cam/stream 与 /cam/snapshot 在这里注册；流发送任务也一并起来。 */
+    ESP_RETURN_ON_ERROR(bench_cam_stream_start(hd), TAG, "camera endpoints");
 
     ESP_LOGI(TAG, "httpd up; page http://%s/", WHEEL_AP_IP);
     return ESP_OK;

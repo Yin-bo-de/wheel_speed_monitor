@@ -40,6 +40,9 @@ set(RC_INPUT_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/rc_input/rc_input.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/rc_input/rc_render.c
 )
+set(CAM_RATE_SRCS
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/cam_rate/cam_rate.c
+)
 set(MAIN_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main/config_params.c
 )
@@ -53,6 +56,7 @@ set(COMMON_INC_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/strategy/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/servo_act/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../components/rc_input/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/cam_rate/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../main
 )
 
@@ -78,3 +82,4 @@ add_native_test(servo_sim ${SERVO_ACT_SRCS})
 add_native_test(strategy_render ${STRATEGY_SRCS})
 add_native_test(rc_input ${RC_INPUT_SRCS})
 add_native_test(rc_render ${RC_INPUT_SRCS})
+add_native_test(cam_rate ${CAM_RATE_SRCS})

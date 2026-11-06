@@ -50,6 +50,16 @@ extern "C" {
 #define WHEEL_HTTPD_CORE 1
 #define WHEEL_HTTPD_STACK 8192
 
+/* 相机任务：发布任务唯一持有相机句柄，优先级略高于 httpd；流任务与 httpd
+ * 同级，避免长时间发送把配置命令饿着。esp32-camera 内部 DMA 任务由
+ * CONFIG_CAMERA_CORE1 钉到 Core1。 */
+#define WHEEL_CAM_PUB_CORE 1
+#define WHEEL_CAM_PUB_PRIO 6
+#define WHEEL_CAM_PUB_STACK 6144
+#define WHEEL_CAM_STREAM_CORE 1
+#define WHEEL_CAM_STREAM_PRIO 5
+#define WHEEL_CAM_STREAM_STACK 4096
+
 /* 队列（全静态内容，OOM 豁免：定长小结构） */
 #define WHEEL_RAW_Q_LEN 4
 #define WHEEL_TELE_Q_LEN 4
