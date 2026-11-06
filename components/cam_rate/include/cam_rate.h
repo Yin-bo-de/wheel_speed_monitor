@@ -63,6 +63,10 @@ void cam_rate_stream_stop(cam_rate_t *r, uint32_t now_ms);
 /* 上报一帧的发送耗时（含 TCP 阻塞），返回调整后的 effective。 */
 uint32_t cam_rate_report_send(cam_rate_t *r, uint32_t send_ms, uint32_t now_ms);
 
+/* 只清空当前 1 秒统计窗口，不动 effective 和冷却状态。相机临时恢复默认
+ * 时序重测基准帧率时，用来丢弃那段异常样本。 */
+void cam_rate_reset_window(cam_rate_t *r);
+
 uint32_t cam_rate_effective(const cam_rate_t *r);
 uint32_t cam_rate_cap(const cam_rate_t *r);
 

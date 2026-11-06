@@ -27,8 +27,13 @@ _Static_assert(CAM_RATE_FPS_MAX == CFG_CAM_FPS_MAX, "cam_rate max fps mismatch")
 #define CAM_FPS_CALIB_FRAMES 20
 /* init 后 AEC/AGC 还在收敛，暗环境前几帧曝光时间长，先丢几帧再测。 */
 #define CAM_FPS_CALIB_SETTLE_FRAMES 5
-/* 窗口内最大间隔超过平均值的这个倍数，判为长阻塞污染，重测一次。 */
-#define CAM_FPS_CALIB_OUTLIER_FACTOR 2
+/* 限速状态下测不到真实基准：目标低于 base 时传感器被分频拉低。
+ * 定期恢复默认时序重测，跟踪光照变化。 */
+#define CAM_BASE_RECAL_MS 30000
+/* 重测切换寄存器后先丢几帧，等新时序稳定。 */
+#define CAM_FPS_RECAL_SETTLE_FRAMES 3
+/* 未限速时实际帧率就是基准，和采集日志共用 5 秒窗口观测更新。 */
+#define CAM_BASE_OBSERVE_MS 5000
 #define CAM_DEADLINE_NONE UINT32_MAX
 
 typedef enum {
@@ -89,18 +94,21 @@ static uint32_t s_fail_count;
 static uint32_t s_big_frame_drops; /* 帧大于发布缓冲：限频打印，别刷日志 */
 
 /* 传感器帧率控制。基准帧率在初始化后实测，之后按目标/基准换算寄存器；
- * 传感器不支持时退回"按目标节奏取帧"，至少不让 DMA/拷贝继续全速跑。 */
+ * 传感器不支持时退回"按目标节奏取帧"，至少不让 DMA/拷贝继续全速跑。
+ *
+ * base 会随光照、AEC 曝光时间变化，不能只测一次：未限速时用实际帧率
+ * 滚动更新；限速时定期恢复默认时序重测。 */
 static uint32_t s_base_fps;
 static uint32_t s_sensor_fps_applied;
 static bool s_fps_calibrated;
 static bool s_sensor_fps_ok;
-static bool s_calib_started;
-static uint32_t s_calib_frames;
-static uint32_t s_calib_settle;
-static uint32_t s_calib_start_ms;
+static bool s_calib_active;                        /* 采样窗口进行中 */
+static uint32_t s_calib_settle;                    /* 还要丢几帧 */
 static uint32_t s_calib_last_grab_ms;
-static uint32_t s_calib_max_gap_ms;
-static uint32_t s_calib_retries;
+static uint32_t s_calib_gap_count;
+static uint32_t s_calib_gaps[CAM_FPS_CALIB_FRAMES - 1];
+static uint32_t s_base_last_ms;                    /* 上次校准/观测更新时刻 */
+static bool s_base_dirty;                          /* base 变了，待重设限速 */
 static uint32_t s_next_grab_ms;
 
 static uint32_t now_ms(void)
@@ -238,9 +246,12 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
 {
     bool published = false;
     bool log_fps = false;
+    bool log_base = false;
     float fps_snapshot = 0.0f;
     uint32_t target_snapshot = 0;
     uint32_t cap_snapshot = 0;
+    uint32_t base_log_old = 0;
+    uint32_t base_log_new = 0;
     lock();
     /* 能拿到帧就说明传感器还在出数据，失败计数清零；帧太大只是发布缓冲
      * 不够，不该和"取帧超时"混成同一个故障。 */
@@ -271,13 +282,28 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
             /* 采集侧实测。和 camstream 的 stream 日志对齐看：grab 低是采集，
              * grab 正常而 send 低是网络。 */
             uint32_t log_elapsed = now - s_fps_log_start_ms;
-            if (log_elapsed >= 5000) {
+            if (log_elapsed >= CAM_BASE_OBSERVE_MS) {
                 log_fps = true;
                 fps_snapshot = (float)s_fps_log_frames * 1000.0f / (float)log_elapsed;
                 s_fps_log_start_ms = now;
                 s_fps_log_frames = 0;
                 target_snapshot = cam_rate_effective(&s_rate);
                 cap_snapshot = cam_rate_cap(&s_rate);
+
+                /* 未限速时 grab 就是当前基准帧率，滚动更新以跟光照变化。
+                 * 限速时 grab 等于目标，不能拿来更新，否则会把 base 越拉越低。 */
+                if (s_fps_calibrated && s_sensor_fps_ok && !s_calib_active &&
+                    target_snapshot >= s_base_fps) {
+                    uint32_t observed = (uint32_t)(fps_snapshot + 0.5f);
+                    if (observed >= 1 && observed != s_base_fps) {
+                        base_log_old = s_base_fps;
+                        base_log_new = observed;
+                        s_base_fps = observed;
+                        s_base_last_ms = now;
+                        s_base_dirty = true;
+                        log_base = true;
+                    }
+                }
             }
         }
     } else if (s_pub != NULL && frame->len > s_pub_cap) {
@@ -292,6 +318,10 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
         ESP_LOGI(TAG, "grab fps=%.1f target=%lu cap=%lu pacing=%s",
                  fps_snapshot, (unsigned long)target_snapshot,
                  (unsigned long)cap_snapshot, s_sensor_fps_ok ? "sensor" : "grab");
+    }
+    if (log_base) {
+        ESP_LOGI(TAG, "base observed: %lu -> %lu fps",
+                 (unsigned long)base_log_old, (unsigned long)base_log_new);
     }
 
     /* 通知放在锁外：发送侧不在锁内做任何事，这里也不持锁做调度操作。
@@ -308,74 +338,58 @@ static void reset_calib_state(void)
     s_sensor_fps_ok = false;
     s_sensor_fps_applied = 0;
     s_base_fps = 0;
-    s_calib_started = false;
-    s_calib_frames = 0;
+    s_calib_active = false;
     s_calib_settle = 0;
-    s_calib_start_ms = 0;
     s_calib_last_grab_ms = 0;
-    s_calib_max_gap_ms = 0;
-    s_calib_retries = 0;
+    s_calib_gap_count = 0;
+    s_base_last_ms = 0;
+    s_base_dirty = false;
     s_next_grab_ms = 0;
 }
 
-/* 先丢 init 后的若干帧让 AEC/AGC 收敛，再用随后 20 帧测传感器默认帧率，
- * 然后改寄存器。放在相机任务里做，不额外增加 init 阻塞。
- * 窗口内如果出现远超平均的长间隔（WiFi/httpd 长阻塞），基准会被拉低，
- * 之后所有 VTS 换算都系统性偏快；这种情况丢弃窗口重测一次。 */
-static void calibrate_sensor_fps(uint32_t grab_ms)
+/* 帧间隔取中位数换算帧率：比总时间平均抗启动抖动和偶发长尾。 */
+static uint32_t fps_from_median_gap(uint32_t *gaps, uint32_t count)
 {
-    if (s_fps_calibrated || !s_sensor_fps_ok) {
-        return;
-    }
-    /* 丢掉 init 后队列里的第一帧，并给自动曝光/自动增益留收敛时间。 */
-    if (!s_calib_started) {
-        s_calib_started = true;
-        s_calib_settle = CAM_FPS_CALIB_SETTLE_FRAMES;
-        return;
-    }
-    if (s_calib_settle > 0) {
-        s_calib_settle--;
-        return;
-    }
-    if (s_calib_frames == 0) {
-        s_calib_start_ms = grab_ms;
-        s_calib_last_grab_ms = grab_ms;
-        s_calib_max_gap_ms = 0;
-    } else {
-        uint32_t gap = grab_ms - s_calib_last_grab_ms;
-        if (gap > s_calib_max_gap_ms) {
-            s_calib_max_gap_ms = gap;
+    for (uint32_t i = 1; i < count; i++) {
+        uint32_t v = gaps[i];
+        uint32_t j = i;
+        while (j > 0 && gaps[j - 1] > v) {
+            gaps[j] = gaps[j - 1];
+            j--;
         }
-        s_calib_last_grab_ms = grab_ms;
+        gaps[j] = v;
     }
-    s_calib_frames++;
-    if (s_calib_frames < CAM_FPS_CALIB_FRAMES) {
-        return;
+    uint32_t med = gaps[count / 2];
+    if (med == 0) {
+        med = 1;
     }
+    uint32_t fps = (1000u + med / 2u) / med;
+    if (fps < 1) {
+        fps = 1;
+    }
+    if (fps > 60) {
+        fps = 60;
+    }
+    return fps;
+}
 
-    uint32_t elapsed = grab_ms - s_calib_start_ms;
-    if (elapsed == 0) {
-        s_calib_frames = 0; /* 时间戳还没走，下一帧重新量 */
-        return;
-    }
-    uint32_t avg_gap = elapsed / (s_calib_frames - 1u);
-    if (avg_gap != 0 && s_calib_retries == 0 &&
-        s_calib_max_gap_ms > avg_gap * CAM_FPS_CALIB_OUTLIER_FACTOR) {
-        s_calib_retries++;
-        s_calib_frames = 0;
-        ESP_LOGW(TAG, "fps calibration outlier %lu ms (avg %lu ms), retry",
-                 (unsigned long)s_calib_max_gap_ms, (unsigned long)avg_gap);
-        return;
-    }
-    uint32_t base = (uint32_t)(s_calib_frames - 1) * 1000u / elapsed;
-    if (base < 1) {
-        base = 1;
-    }
-    if (base > 60) {
-        base = 60;
-    }
+static void start_calib_sampling(uint32_t settle_frames)
+{
+    s_calib_active = true;
+    s_calib_settle = settle_frames;
+    s_calib_gap_count = 0;
+    s_calib_last_grab_ms = 0;
+}
+
+static void finish_calib(uint32_t grab_ms, bool was_recal)
+{
+    uint32_t base = fps_from_median_gap(s_calib_gaps, CAM_FPS_CALIB_FRAMES - 1);
+    uint32_t old = s_base_fps;
     s_base_fps = base;
     s_fps_calibrated = true;
+    s_calib_active = false;
+    s_base_last_ms = grab_ms;
+    s_base_dirty = false;
 
     uint32_t target;
     lock();
@@ -384,13 +398,82 @@ static void calibrate_sensor_fps(uint32_t grab_ms)
 
     esp_err_t e = camera_drv_set_fps(s_base_fps, target);
     if (e == ESP_OK) {
-        s_sensor_fps_applied = target;
-        ESP_LOGI(TAG, "sensor fps calibrated: base=%lu, target=%lu",
-                 (unsigned long)s_base_fps, (unsigned long)target);
+        s_sensor_fps_applied = target; /* 目标高于 base 时驱动保持基准 */
+        if (was_recal) {
+            ESP_LOGI(TAG, "base recalibrated: %lu -> %lu fps (target %lu)",
+                     (unsigned long)old, (unsigned long)base, (unsigned long)target);
+        } else {
+            ESP_LOGI(TAG, "base calibrated: %lu fps (target %lu)",
+                     (unsigned long)base, (unsigned long)target);
+        }
     } else {
         s_sensor_fps_ok = false;
         ESP_LOGW(TAG, "sensor fps set failed (%d), fall back to grab pacing", e);
     }
+}
+
+/* 先丢几帧让 AEC/AGC 收敛，再用随后 20 帧的帧间隔中位数测基准帧率。
+ * 未限速时实际帧率就是基准，由 publish_frame 的 5 秒窗口滚动更新；
+ * 限速时这里定期恢复默认时序重测，跟踪光照变化。 */
+static void calibrate_sensor_fps(uint32_t grab_ms)
+{
+    if (!s_sensor_fps_ok) {
+        return;
+    }
+
+    uint32_t eff;
+    lock();
+    eff = cam_rate_effective(&s_rate);
+    unlock();
+
+    if (!s_calib_active && s_fps_calibrated && eff < s_base_fps &&
+        (uint32_t)(grab_ms - s_base_last_ms) >= CAM_BASE_RECAL_MS) {
+        esp_err_t e = camera_drv_reset_fps();
+        if (e == ESP_OK) {
+            /* 重测期间传感器跑默认帧率，发送侧仍按 effective 限速，画面
+             * 不会加速；清掉窗口统计，避免采集变化被误判成网络变化。 */
+            lock();
+            cam_rate_reset_window(&s_rate);
+            unlock();
+            start_calib_sampling(CAM_FPS_RECAL_SETTLE_FRAMES);
+            s_base_dirty = false;
+            ESP_LOGI(TAG, "base recal start: target=%lu base=%lu",
+                     (unsigned long)eff, (unsigned long)s_base_fps);
+            return;
+        }
+        /* 失败也推迟到下一轮，别每帧重试 */
+        s_base_last_ms = grab_ms;
+        ESP_LOGW(TAG, "base recal reset failed: %d", e);
+    }
+
+    if (!s_calib_active) {
+        if (!s_fps_calibrated) {
+            start_calib_sampling(CAM_FPS_CALIB_SETTLE_FRAMES);
+        } else {
+            return;
+        }
+    }
+
+    if (s_calib_settle > 0) {
+        s_calib_settle--;
+        return;
+    }
+    if (s_calib_last_grab_ms == 0) {
+        s_calib_last_grab_ms = grab_ms;
+        return;
+    }
+
+    uint32_t gap = grab_ms - s_calib_last_grab_ms;
+    s_calib_last_grab_ms = grab_ms;
+    if (gap == 0) {
+        return;
+    }
+    s_calib_gaps[s_calib_gap_count++] = gap;
+    if (s_calib_gap_count < CAM_FPS_CALIB_FRAMES - 1) {
+        return;
+    }
+
+    finish_calib(grab_ms, s_fps_calibrated);
 }
 
 /* 传感器不支持控速时的兜底：按有效帧率决定下一次取帧时间。 */
@@ -545,12 +628,14 @@ static void cam_task(void *arg)
             }
         }
 
-        if (action == ACT_NONE && s_state == CAM_ON && s_fps_calibrated &&
-            s_sensor_fps_ok) {
+        if (action == ACT_NONE && !s_calib_active && s_state == CAM_ON &&
+            s_fps_calibrated && s_sensor_fps_ok) {
             uint32_t eff = cam_rate_effective(&s_rate);
-            if (eff != s_sensor_fps_applied) {
+            /* base 观测更新后，即使目标没变也要重算分频/VTS。 */
+            if (eff != s_sensor_fps_applied || s_base_dirty) {
                 fps_to_apply = eff;
                 s_sensor_fps_applied = eff; /* 失败时下面的分支会关掉传感器控制 */
+                s_base_dirty = false;
                 action = ACT_SET_FPS;
             }
         }

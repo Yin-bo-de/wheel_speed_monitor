@@ -359,6 +359,41 @@ esp_err_t camera_drv_set_fps(uint32_t base_fps, uint32_t target_fps)
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+esp_err_t camera_drv_reset_fps(void)
+{
+    if (!s_inited || !s_fps_supported || s_sensor == NULL) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    if (s_sensor->id.PID == OV2640_PID) {
+        if (s_cur_clkrc == s_base_clkrc) {
+            return ESP_OK;
+        }
+        int ret = s_sensor->set_reg(s_sensor, 0x0111, 0xFF, s_base_clkrc);
+        if (ret != 0) {
+            ESP_LOGW(TAG, "reset CLKRC failed: %d", ret);
+            return ESP_FAIL;
+        }
+        s_cur_clkrc = s_base_clkrc;
+        return ESP_OK;
+    }
+
+    if (s_sensor->id.PID == OV5640_PID) {
+        if (s_cur_vts == s_base_vts) {
+            return ESP_OK;
+        }
+        int ret = s_sensor->set_reg(s_sensor, 0x380E, 0xFFFF, s_base_vts);
+        if (ret != 0) {
+            ESP_LOGW(TAG, "reset VTS failed: %d", ret);
+            return ESP_FAIL;
+        }
+        s_cur_vts = s_base_vts;
+        return ESP_OK;
+    }
+
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 esp_err_t camera_drv_grab(camera_drv_frame_t *out)
 {
     if (out == NULL) {

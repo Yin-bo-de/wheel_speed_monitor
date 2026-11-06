@@ -131,7 +131,28 @@ static void test_medium_window_breaks_fast_streak(void)
     TEST_ASSERT_EQUAL_INT(1, r.fast_streak);
 }
 
-/* 7. 流进行中改上限：低于当前立即降，高于当前等恢复；断流保留，deinit 回上限 */
+/* 7. 窗口重置只丢未结算样本，不动 effective 和冷却状态 */
+static void test_reset_window_drops_pending_samples(void)
+{
+    cam_rate_t r;
+    cam_rate_init(&r, 10);
+    cam_rate_stream_start(&r, 0);
+    TEST_ASSERT_EQUAL_INT(7, report_window(&r, 300, 5000, 6000));
+
+    /* 窗口里先塞慢样本，未结算就重置 */
+    (void)cam_rate_report_send(&r, 300, 6000);
+    (void)cam_rate_report_send(&r, 300, 6500);
+    cam_rate_reset_window(&r);
+    TEST_ASSERT_EQUAL_INT(7, cam_rate_effective(&r));
+    TEST_ASSERT_EQUAL_INT(0, r.win_frames);
+    TEST_ASSERT_EQUAL_INT(0, r.fast_streak);
+
+    /* 重置后从快帧重新开始，不会带着旧慢样本降速 */
+    TEST_ASSERT_EQUAL_INT(7, report_window(&r, 20, 6600, 7700));
+    TEST_ASSERT_EQUAL_INT(1, r.fast_streak);
+}
+
+/* 8. 流进行中改上限：低于当前立即降，高于当前等恢复；断流保留，deinit 回上限 */
 static void test_cap_change_during_stream(void)
 {
     cam_rate_t r;
@@ -166,5 +187,6 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_long_block_halves, "test_long_block_halves", __LINE__);
     UnityDefaultTestRun(test_fast_windows_recover, "test_fast_windows_recover", __LINE__);
     UnityDefaultTestRun(test_medium_window_breaks_fast_streak, "test_medium_window_breaks_fast_streak", __LINE__);
+    UnityDefaultTestRun(test_reset_window_drops_pending_samples, "test_reset_window_drops_pending_samples", __LINE__);
     UnityDefaultTestRun(test_cap_change_during_stream, "test_cap_change_during_stream", __LINE__);
 )

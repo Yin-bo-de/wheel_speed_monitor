@@ -152,6 +152,18 @@ uint32_t cam_rate_report_send(cam_rate_t *r, uint32_t send_ms, uint32_t now_ms)
     return r->effective;
 }
 
+void cam_rate_reset_window(cam_rate_t *r)
+{
+    if (r == NULL) {
+        return;
+    }
+    r->win_start_ms = 0;
+    r->win_sum_ms = 0;
+    r->win_frames = 0;
+    r->last_avg_ms = 0;
+    r->fast_streak = 0;
+}
+
 uint32_t cam_rate_effective(const cam_rate_t *r)
 {
     return (r != NULL) ? r->effective : CAM_RATE_FPS_MIN;
