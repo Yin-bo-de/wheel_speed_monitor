@@ -285,10 +285,9 @@ static esp_err_t handle_upload(httpd_req_t *req)
 
     esp_err_t e = send_ok_restart(req, new_version, received);
     if (e != ESP_OK) {
-        /* 响应没发出去就不重启，页面至少能看到失败并重试。 */
-        bench_cam_resume_after_ota();
-        s_ota_busy = false;
-        return e;
+        /* 启动分区已经切过去了，重启是唯一一致的动作。不重启会让页面
+         * 以为失败，可设备下次重启却进了新固件。 */
+        ESP_LOGW(TAG, "ota response failed (%s), restart anyway", esp_err_to_name(e));
     }
     ESP_LOGI(TAG, "ota success: %lu bytes -> %s (%s), restarting",
              (unsigned long)received, part_name(part), new_version);
@@ -316,7 +315,7 @@ static esp_err_t handle_rollback(httpd_req_t *req)
     copy_field(version, sizeof(version), desc.version, sizeof(desc.version));
     esp_err_t e = send_ok_restart(req, version, 0);
     if (e != ESP_OK) {
-        return e;
+        ESP_LOGW(TAG, "rollback response failed (%s), restart anyway", esp_err_to_name(e));
     }
     ESP_LOGI(TAG, "rollback -> %s (%s), restarting", part_name(other), version);
     vTaskDelay(pdMS_TO_TICKS(2000));

@@ -1240,7 +1240,9 @@ function otaRenderInfo(info) {
     : "空";
   const canRollback = !otaInProgress && info.other_version && info.other_state === "valid";
   $("ota-rollback").disabled = !canRollback;
-  if (info.other_state === "aborted") {
+  if (info.busy) {
+    otaMsg("设备上已有升级任务在进行，请等待完成。", "warn");
+  } else if (info.other_state === "aborted") {
     otaMsg("上次升级的固件启动失败，设备已自动回滚到当前版本。", "warn");
   }
   $("ota-card").classList.toggle("disabled", otaInProgress || info.busy);
@@ -1318,7 +1320,11 @@ function otaCancelConfirm() {
 
 function otaStartClick() {
   const f = $("ota-file").files[0];
-  if (!f || !otaInfo || otaInProgress) return;
+  if (!f || otaInProgress) return;
+  if (!otaInfo) {
+    otaMsg("还没拿到设备版本信息，请刷新页面后重试。", "err");
+    return;
+  }
   const meta = JSON.parse($("ota-file").dataset.meta || "{}");
   const cmp = otaVersionCmp(meta.version, otaInfo.version);
   const dir = cmp === null ? "版本不同" : cmp > 0 ? "升级" : cmp < 0 ? "降级" : "版本相同";
