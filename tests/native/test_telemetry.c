@@ -187,6 +187,7 @@ static void test_render_sys_cam_and_heap_int(void)
         .res = "qvga",
         .quality = 12,
         .fps_cap = 15,
+        .fps_user_cap = 20,
         .fps_eff = 8,
         .overlay_mask = 0x0F,
         .fps = 14.8f,
@@ -208,6 +209,7 @@ static void test_render_sys_cam_and_heap_int(void)
     assert_contains(buf, "\"res\":\"qvga\"");
     assert_contains(buf, "\"quality\":12");
     assert_contains(buf, "\"fps_cap\":15");
+    assert_contains(buf, "\"fps_user_cap\":20");
     assert_contains(buf, "\"fps_eff\":8");
     assert_contains(buf, "\"overlay\":15");
     assert_contains(buf, "\"fps\":14.8");

@@ -1138,6 +1138,7 @@ void bench_cam_get_status(telem_cam_status_t *out)
     out->res = res_str(s_applied_res);
     out->quality = (uint8_t)s_applied_quality;
     out->fps_cap = (uint8_t)cam_rate_cap(&s_rate);
+    out->fps_user_cap = (uint8_t)s_user_fps_cap;
     out->fps_eff = (uint8_t)cam_rate_effective(&s_rate);
     out->overlay_mask = s_cached_overlay;
     out->bytes = (uint32_t)s_frame_len;

@@ -882,8 +882,12 @@ function camWatchdog() {
 
 function camStatusText(cam) {
   const cap = cam.fps_cap || 15;
+  const userCap = cam.fps_user_cap || cap;
   const eff = cam.fps_eff || cap;
-  const fpsTxt = eff < cap ? `采集 ${eff}fps（上限 ${cap}，自动降速）` : `采集 ${cap}fps`;
+  const capNote = userCap > cap ? `上限 ${cap}，配置 ${userCap}` : `上限 ${cap}`;
+  const fpsTxt = eff < cap
+    ? `采集 ${eff}fps（${capNote}，自动降速）`
+    : `采集 ${cap}fps（${capNote}）`;
   const spec = `${(cam.res || "qvga").toUpperCase()} · ${fpsTxt} · q${cam.quality || 12}`;
   if (cam.state === "off") return "相机已关闭";
   if (cam.state === "fail") return "相机初始化失败，看串口日志";
@@ -903,7 +907,9 @@ function camEcho(cam) {
     if (document.activeElement !== $("cam-policy")) $("cam-policy").value = cam.policy || "on_demand";
     if (document.activeElement !== $("cam-res")) $("cam-res").value = cam.res || "qvga";
     echoNum($("cam-quality"), cam.quality ?? 12);
-    echoNum($("cam-fps"), cam.fps_cap ?? 15);
+    /* 输入框回显用户配置值；fps_cap 是夹到传感器实测上限后的值，
+     * 用它回显会让用户改不动设置。 */
+    echoNum($("cam-fps"), cam.fps_user_cap ?? cam.fps_cap ?? 15);
     for (let i = 0; i < 4; i++) echoChk($("cam-ov" + i), (cam.overlay ?? 15) & (1 << i));
   }
   const quick = ["ov-wheels", "ov-servo", "ov-rc", "ov-sys"];
