@@ -27,6 +27,9 @@ static uint8_t s_ota_buf[4096];
 
 /* 客户端卡住时连续超时的上限，避免 handler 永远不返回。 */
 #define OTA_RECV_TIMEOUT_MAX 10
+/* 整轮上传的绝对上限：只看连续超时挡不住每隔几秒发一个字节的客户端，
+ * 那种连接会让 OTA 状态和相机停摆被无限期占住。 */
+#define OTA_UPLOAD_TIMEOUT_MS 120000
 
 static const char *part_name(const esp_partition_t *p)
 {
@@ -226,7 +229,12 @@ static esp_err_t handle_upload(httpd_req_t *req)
     size_t received = 0;
     int timeouts = 0;
     const char *fail_msg = NULL;
+    TickType_t started = xTaskGetTickCount();
     while (received < content_len) {
+        if ((xTaskGetTickCount() - started) > pdMS_TO_TICKS(OTA_UPLOAD_TIMEOUT_MS)) {
+            fail_msg = "upload timeout";
+            break;
+        }
         int r = httpd_req_recv(req, (char *)s_ota_buf, sizeof(s_ota_buf));
         if (r == HTTPD_SOCK_ERR_TIMEOUT) {
             if (++timeouts > OTA_RECV_TIMEOUT_MAX) {
@@ -306,10 +314,19 @@ static esp_err_t handle_rollback(httpd_req_t *req)
     if (other == NULL || !read_part_desc(other, &desc)) {
         return send_error(req, "409 Conflict", "no valid backup partition");
     }
+    /* set_boot_partition 不看 otadata 状态，会把已经因启动失败被标记
+     * aborted 的镜像再切回去，白搭一轮重启。只接受验证过的分区。 */
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (esp_ota_get_state_partition(other, &state) != ESP_OK ||
+        state != ESP_OTA_IMG_VALID) {
+        return send_error(req, "409 Conflict", "backup partition not verified");
+    }
     esp_err_t err = esp_ota_set_boot_partition(other);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "rollback set_boot failed: %s", esp_err_to_name(err));
-        return send_error(req, "500 Internal Server Error", "switch boot partition failed");
+        const char *status = (err == ESP_ERR_OTA_VALIDATE_FAILED)
+                                 ? "409 Conflict" : "500 Internal Server Error";
+        return send_error(req, status, "switch boot partition failed");
     }
     char version[33] = "";
     copy_field(version, sizeof(version), desc.version, sizeof(desc.version));

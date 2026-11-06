@@ -546,6 +546,8 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = WHEEL_HTTPD_STACK;
     cfg.core_id = WHEEL_HTTPD_CORE;
+    /* 默认只有 8 个 URI 槽位：页面 4 + 相机 2 + OTA 3 = 9，不扩会注册失败。 */
+    cfg.max_uri_handlers = 12;
     /* 4 个 WS + 1 个 MJPEG + 页面/快照/临时连接；默认 7 在满员时会把
      * 新连接挤掉，lwIP 侧已经给了 16 个 socket。 */
     cfg.max_open_sockets = 10;

@@ -7,6 +7,7 @@
 #include "camera_drv.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/task.h"
 
 #include "wheel_config.h"
@@ -933,8 +934,9 @@ void bench_cam_suspend_for_ota(void)
     s_reinit_requested = false;
     unlock();
 
-    /* cam_task 空闲轮询 20ms；等它真正 deinit 完再开始写 flash。 */
-    for (int i = 0; i < 100; i++) {
+    /* cam_task 空闲轮询 20ms；用墙钟卡总时长，锁竞争时不会无限延长。 */
+    int64_t started = esp_timer_get_time();
+    while (esp_timer_get_time() - started < 2000000) {
         if (bench_cam_state() == BENCH_CAM_STATE_OFF) {
             return;
         }
@@ -950,11 +952,17 @@ void bench_cam_resume_after_ota(void)
     }
     lock();
     s_ota_suspend = false;
-    if (s_applied_policy == CFG_CAM_POLICY_ALWAYS ||
-        (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_preview_active)) {
+    if ((s_applied_policy == CFG_CAM_POLICY_ALWAYS ||
+         (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_preview_active)) &&
+        s_state != CAM_ON) {
         s_init_requested = true;
     } else if (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_state == CAM_OFF) {
         s_state = CAM_IDLE;
+    } else if (s_applied_policy == CFG_CAM_POLICY_ON_DEMAND && s_state == CAM_ON &&
+               !s_stream_active && !s_preview_active &&
+               s_preview_deadline == CAM_DEADLINE_NONE) {
+        /* 挂起等待超时、相机没来得及停：补保持截止时间，别让它一直开着。 */
+        s_preview_deadline = now_ms() + CAM_PREVIEW_HOLD_MS;
     }
     unlock();
 }

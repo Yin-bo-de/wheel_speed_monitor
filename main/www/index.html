@@ -819,6 +819,8 @@ function camUpdateViewGeometry() {
 }
 
 function camSendPreview(active) {
+  /* 升级中只允许关闭预览：再打开会把 /cam/stream 塞进被上传占住的 httpd。 */
+  if (otaInProgress && active) return;
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "cam_preview", active }));
 }
 
@@ -849,6 +851,7 @@ function camStopStream() {
 /* 切回监测 tab 时决定是复用原流还是重新请求。服务端说 streaming=true
  * 就绝不动 src，否则第二个流请求会拿 503 把原画面顶掉。 */
 function camSyncView() {
+  if (otaInProgress) return;
   if (camStatic) { camPollStart(); return; }
   if (activeTab !== "monitor" || document.hidden) return;
   if (lastCam && lastCam.state === "off") { camSetHint("相机已关闭"); return; }
@@ -859,6 +862,7 @@ function camSyncView() {
 }
 
 function camWatchdog() {
+  if (otaInProgress) return;
   if (camStatic || activeTab !== "monitor" || document.hidden || !lastCam) return;
   if (lastCam.streaming) return;
   if (lastCam.state === "off") { camSetHint("相机已关闭"); return; }
@@ -1223,6 +1227,8 @@ function connectWS() {
 let otaInProgress = false;
 let otaInfo = null;
 let otaConfirmKind = null;
+/* 本次升级/回退期望启动的分区；设备回来后 running 必须等于它。 */
+let otaTargetPartition = null;
 
 function otaMsg(text, cls) {
   const el = $("ota-msg");
@@ -1339,16 +1345,23 @@ function otaSetBusy(on) {
   $("ota-card").classList.toggle("disabled", on);
   if (on) {
     camStopStream();
+    camSendPreview(false);
     $("ota-bar-wrap").hidden = false;
     $("ota-bar").style.width = "0%";
     $("status-dot").className = "warn";
     $("status-text").textContent = "正在升级固件…";
+  } else {
+    /* WS 一直连着不会重触发 onopen，失败后状态栏得自己恢复。 */
+    const linked = ws && ws.readyState === 1;
+    $("status-dot").className = linked ? "ok" : "warn";
+    $("status-text").textContent = linked ? "已连接" : "断开，重连中…";
   }
 }
 
 function otaUpload() {
   const f = $("ota-file").files[0];
   if (!f) return;
+  otaTargetPartition = otaInfo ? otaInfo.other : null;
   otaSetBusy(true);
   otaMsg("正在上传，请勿断电…");
   const xhr = new XMLHttpRequest();
@@ -1408,7 +1421,10 @@ async function otaWaitReboot(result) {
   for (let i = 0; i < 30; i++) {
     try {
       const info = await otaFetchInfoWithTimeout();
-      if (!info.busy) {
+      /* 必须看到 running 真切到目标分区。只看 busy=false 会把「请求没
+       * 发出去、设备一直跑旧固件」误判成升级成功。 */
+      const switched = !otaTargetPartition || info.running === otaTargetPartition;
+      if (!info.busy && switched) {
         otaMsg("升级完成，页面即将刷新。", "ok");
         setTimeout(() => location.reload(), 800);
         return;
@@ -1417,11 +1433,12 @@ async function otaWaitReboot(result) {
     await new Promise(r => setTimeout(r, 1000));
   }
   otaSetBusy(false);
-  otaMsg("设备 30 秒内没有回来。检查是否断电，或手动连回 wheel-bench 热点后刷新页面。", "err");
+  otaMsg("设备没有切到目标分区。检查是否断电、是否自动回滚，或手动连回 wheel-bench 热点后刷新页面。", "err");
   otaRefresh();
 }
 
 function otaRollback() {
+  otaTargetPartition = otaInfo ? otaInfo.other : null;
   otaSetBusy(true);
   otaMsg("正在切换启动分区…");
   fetch("/api/ota/rollback", { method: "POST" })
