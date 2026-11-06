@@ -35,6 +35,7 @@
 
 #include "bench_cam.h"
 #include "bench_http_server.h"
+#include "bench_ota.h"
 #include "config_store.h"
 #include "rc_capture.h"
 #include "rc_input.h"
@@ -442,6 +443,11 @@ static void ws_push_task(void *arg)
         vTaskDelayUntil(&last, pdMS_TO_TICKS(WHEEL_WS_PUSH_MS));
         uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
+        /* 升级期间 httpd 被上传占住，异步广播会在队列里堆积。 */
+        if (bench_ota_busy()) {
+            continue;
+        }
+
         /* 组装各轮显示快照：全部写 s_units[0].disp（渲染端固定读它，
          * 此前误写各 unit 自己的 wheels[i]，导致只有 wheels[0] 有值、
          * wheels[1..3] 全零→页面显示禁用/0 RPM） */
@@ -591,6 +597,9 @@ void app_main(void)
         .units = s_units,
     };
     ESP_ERROR_CHECK(bench_http_server_start(&ctx));
+
+    /* WiFi 与 httpd 都起来了才算这次启动可用，否则让 bootloader 回滚。 */
+    bench_ota_mark_valid();
 
     /* httpd 与 mutex 就绪后再起推送任务，避免 xSemaphoreTake(NULL) */
     xTaskCreatePinnedToCore(sampler_task, "sampler", WHEEL_SAMPLER_STACK, NULL,

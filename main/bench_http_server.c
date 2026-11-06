@@ -12,6 +12,7 @@
 #include "bench_cam.h"
 #include "bench_cam_stream.h"
 #include "bench_http_server.h"
+#include "bench_ota.h"
 #include "config_store.h"
 #include "wheel_config.h"
 
@@ -581,6 +582,9 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
 
     /* /cam/stream 与 /cam/snapshot 在这里注册；流发送任务也一并起来。 */
     ESP_RETURN_ON_ERROR(bench_cam_stream_start(hd), TAG, "camera endpoints");
+
+    /* OTA 端点：上传在 httpd 任务里同步执行，不新增任务。 */
+    ESP_RETURN_ON_ERROR(bench_ota_start(hd), TAG, "ota endpoints");
 
     ESP_LOGI(TAG, "httpd up; page http://%s/", WHEEL_AP_IP);
     return ESP_OK;
