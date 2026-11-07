@@ -4,6 +4,12 @@
 
 static const char *TAG = "servo_drv";
 
+/* 逻辑通道 0/1 映射到 LEDC 通道 2/3，避开相机 XCLK 占用的 CHANNEL_0。 */
+static ledc_channel_t servo_ch(uint8_t ch)
+{
+    return (ledc_channel_t)(SERVO_LEDC_CHANNEL_BASE + ch);
+}
+
 /* 脉宽 → 占空比计数。先乘后除再四舍五入：整除截断会把中位 1500µs 少算 0.8 个
  * 计数（约 1µs），数值虽小，但没有白送误差的理由。 */
 static uint32_t us_to_duty(uint32_t us)
@@ -16,12 +22,12 @@ static uint32_t us_to_duty(uint32_t us)
  * sig_out_en 置回 true，所以它同时是 ledc_stop 之后重新出波的那一步。 */
 static esp_err_t ledc_output(servo_ledc_t *s, uint8_t ch)
 {
-    esp_err_t err = ledc_set_duty(SERVO_LEDC_SPEED_MODE, (ledc_channel_t)ch,
+    esp_err_t err = ledc_set_duty(SERVO_LEDC_SPEED_MODE, servo_ch(ch),
                                   us_to_duty(s->target_us[ch]));
     if (err != ESP_OK) {
         return err;
     }
-    return ledc_update_duty(SERVO_LEDC_SPEED_MODE, (ledc_channel_t)ch);
+    return ledc_update_duty(SERVO_LEDC_SPEED_MODE, servo_ch(ch));
 }
 
 esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear,
@@ -57,7 +63,7 @@ esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear,
         ledc_channel_config_t chan = {
             .gpio_num = gpios[i],
             .speed_mode = SERVO_LEDC_SPEED_MODE,
-            .channel = (ledc_channel_t)i,
+            .channel = servo_ch(i),
             .intr_type = LEDC_INTR_DISABLE,
             .timer_sel = SERVO_LEDC_TIMER,
             .duty = 0,
@@ -73,7 +79,7 @@ esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear,
         s->enabled[i] = false;
         /* 建好先停输出：这一刻策略还没跑过第一拍，先让舵机脱力，
          * 免得挂着一个 duty=0 的波形把舵机拽到行程一端。 */
-        ledc_stop(SERVO_LEDC_SPEED_MODE, (ledc_channel_t)i, 0);
+        ledc_stop(SERVO_LEDC_SPEED_MODE, servo_ch(i), 0);
     }
     s->inited = true;
 
@@ -126,7 +132,7 @@ static esp_err_t ledc_set_enabled(void *ctx, uint8_t ch, bool en)
     }
     /* 停波 = 舵机脱力。停在低电平而不是让它浮空：悬空脚容易被旁边走线带出抖动，
      * 而标准舵机收不到脉冲本来就不给力矩，正是"松开"要的效果。 */
-    return ledc_stop(SERVO_LEDC_SPEED_MODE, (ledc_channel_t)ch, 0);
+    return ledc_stop(SERVO_LEDC_SPEED_MODE, servo_ch(ch), 0);
 }
 
 static esp_err_t ledc_step(void *ctx, uint32_t now_ms)

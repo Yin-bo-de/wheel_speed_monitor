@@ -309,7 +309,12 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
                 if (s_fps_calibrated && s_sensor_fps_ok && !s_calib_active &&
                     target_snapshot >= s_base_fps) {
                     uint32_t observed = (uint32_t)(fps_snapshot + 0.5f);
-                    if (observed >= 1 && observed != s_base_fps) {
+                    /* 1fps 的统计抖动不算能力变化，否则 base/cap/target
+                     * 会在 11/12 之间来回刷，日志和 VTS 都跟着抖。 */
+                    uint32_t diff = observed > s_base_fps
+                                        ? observed - s_base_fps
+                                        : s_base_fps - observed;
+                    if (observed >= 1 && diff >= 2) {
                         base_log_old = s_base_fps;
                         base_log_new = observed;
                         s_base_fps = observed;

@@ -165,6 +165,8 @@ static const char *pid_to_name(uint16_t pid)
     }
 }
 
+static esp_err_t ov5640_apply_s3_pll(sensor_t *sensor);
+
 esp_err_t camera_drv_init(const camera_drv_cfg_t *cfg)
 {
     if (cfg == NULL) {
@@ -230,6 +232,13 @@ esp_err_t camera_drv_init(const camera_drv_cfg_t *cfg)
     s_fps_supported = false;
     s_base_clkrc = s_cur_clkrc = 0;
     s_base_vts = s_cur_vts = 0;
+
+    /* S3 + 20MHz XCLK 下上游 PLL 参数会让 OV5640 只剩 11fps。
+     * 这套参数按 VGA/SVGA 的 HTS/VTS 标定，QVGA 继续走原配置。 */
+    if (sensor->id.PID == OV5640_PID && sensor->xclk_freq_hz == 20000000 &&
+        cfg->res >= CAMERA_DRV_RES_VGA) {
+        (void)ov5640_apply_s3_pll(sensor);
+    }
     if (sensor->get_reg != NULL && sensor->set_reg != NULL) {
         if (sensor->id.PID == OV2640_PID) {
             int clkrc = sensor->get_reg(sensor, 0x0111, 0xFF); /* sensor bank */
@@ -286,6 +295,38 @@ esp_err_t camera_drv_deinit(void)
 bool camera_drv_fps_control_supported(void)
 {
     return s_inited && s_fps_supported;
+}
+
+/* 上游 esp32-camera 对 OV5640 用 multiplier=180、pre_div=2，XCLK 20MHz 时
+ * VCO 高达 1.8GHz，超出传感器 500–1000MHz 规格，实际 PCLK 只有 11.25MHz，
+ * QVGA/VGA 都被压在 11fps。换成 hx-esp32-cam-fpv 在 S3 上验证过的参数：
+ * VCO 606MHz、PCLK 20.22MHz，VGA 约 30fps。
+ * 只改 PLL，不动 HTS/VTS，保持 esp_camera_init 写好的分辨率时序。 */
+static esp_err_t ov5640_apply_s3_pll(sensor_t *sensor)
+{
+    static const struct {
+        uint16_t reg;
+        uint8_t val;
+    } pll[] = {
+        {0x3039, 0x00}, /* PLL bypass 关 */
+        {0x3034, 0x1A}, /* 10-bit mode */
+        {0x3035, 0x11}, /* sys_div = 1 */
+        {0x3036, 91},   /* multiplier */
+        {0x3037, 0x03}, /* pre_div = 3, root_2x 关 */
+        {0x3108, 0x26}, /* pclk_root_div = 2 */
+        {0x3824, 0x03}, /* pclk_div = 3 */
+        {0x460C, 0x22}, /* pclk_manual */
+        {0x3103, 0x13}, /* system clock from PLL */
+    };
+
+    for (size_t i = 0; i < sizeof(pll) / sizeof(pll[0]); i++) {
+        if (sensor->set_reg(sensor, pll[i].reg, 0xFF, pll[i].val) != 0) {
+            ESP_LOGE(TAG, "OV5640 PLL reg 0x%04x write failed", pll[i].reg);
+            return ESP_FAIL;
+        }
+    }
+    ESP_LOGI(TAG, "OV5640 PLL: VCO 606MHz, PCLK 20.22MHz (~30fps at VGA)");
+    return ESP_OK;
 }
 
 esp_err_t camera_drv_set_fps(uint32_t base_fps, uint32_t target_fps)
