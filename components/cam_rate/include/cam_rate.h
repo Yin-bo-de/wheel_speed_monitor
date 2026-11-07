@@ -20,6 +20,14 @@ extern "C" {
 
 #define CAM_RATE_FPS_MIN 5
 #define CAM_RATE_FPS_MAX 25
+/* JPEG quality 的配置范围，与 cfg_params 保持一致（bench_cam 里有静态断言）。 */
+#define CAM_QUALITY_MIN 4
+#define CAM_QUALITY_MAX 63
+/* 自适应画质：帧率已到下限仍拥堵时，每次加 2，最多比用户值高 12；
+ * 网络完全恢复后每两个评估窗口（10 秒）还 2 档。 */
+#define CAM_QUALITY_STEP 2
+#define CAM_QUALITY_MAX_DELTA 12
+#define CAM_QUALITY_RECOVER_WINDOWS 2
 /* 慢发送阈值随有效帧率变化：约 1.5 个帧间隔，最低 100ms、最高 400ms。 */
 #define CAM_RATE_SLOW_MIN_MS 100
 #define CAM_RATE_SLOW_MAX_MS 400
@@ -43,6 +51,7 @@ typedef struct {
     uint32_t win_sum_ms;     /* 窗口内发送耗时总和 */
     uint32_t win_frames;     /* 窗口内帧数 */
     uint32_t last_avg_ms;    /* 最近一个结算窗口的平均发送耗时 */
+    bool last_avg_valid;     /* last_avg_ms 是否来自已结算窗口；0ms 是有效样本 */
     bool stream_active;
 } cam_rate_t;
 
@@ -69,6 +78,28 @@ void cam_rate_reset_window(cam_rate_t *r);
 
 uint32_t cam_rate_effective(const cam_rate_t *r);
 uint32_t cam_rate_cap(const cam_rate_t *r);
+bool cam_rate_avg_valid(const cam_rate_t *r);
+
+/* 自适应 JPEG 画质。帧率已经压到下限、一个帧间隔仍发不完，说明是帧体积
+ * 顶住了链路；这时提高 quality 数值（压缩更强、帧更小），继续降帧率只会
+ * 更卡。网络完全恢复后逐档回到用户配置值。 */
+typedef struct {
+    uint8_t user;         /* 用户配置值 */
+    uint8_t effective;    /* 目标值，评估后立即变化 */
+    uint8_t applied;      /* 驱动确认写进传感器的值 */
+    uint8_t fast_windows; /* 连续快速窗口计数 */
+} cam_quality_t;
+
+void cam_quality_init(cam_quality_t *q, uint8_t user_quality);
+
+/* 每 5 秒评估一次。avg_valid 区分"已结算窗口平均 0ms"和"还没有样本"。
+ * 返回 true 表示 effective 变了，调用方需要写传感器。 */
+bool cam_quality_evaluate(cam_quality_t *q, bool stream_active, bool avg_valid,
+                          uint32_t fps_eff, uint32_t fps_cap,
+                          uint32_t avg_send_ms);
+
+/* 流结束：直接恢复用户配置。返回 true 表示需要写传感器。 */
+bool cam_quality_restore(cam_quality_t *q);
 
 #ifdef __cplusplus
 }

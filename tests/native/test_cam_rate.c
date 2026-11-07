@@ -142,10 +142,12 @@ static void test_reset_window_drops_pending_samples(void)
     /* 窗口里先塞慢样本，未结算就重置 */
     (void)cam_rate_report_send(&r, 300, 6000);
     (void)cam_rate_report_send(&r, 300, 6500);
+    TEST_ASSERT_TRUE(cam_rate_avg_valid(&r));
     cam_rate_reset_window(&r);
     TEST_ASSERT_EQUAL_INT(7, cam_rate_effective(&r));
     TEST_ASSERT_EQUAL_INT(0, r.win_frames);
     TEST_ASSERT_EQUAL_INT(0, r.fast_streak);
+    TEST_ASSERT_FALSE(cam_rate_avg_valid(&r));
 
     /* 重置后从快帧重新开始，不会带着旧慢样本降速 */
     TEST_ASSERT_EQUAL_INT(7, report_window(&r, 20, 6600, 7700));
@@ -180,6 +182,86 @@ static void test_cap_change_during_stream(void)
     TEST_ASSERT_EQUAL_INT(20, cam_rate_effective(&r));
 }
 
+/* 9. 质量默认等于用户值；断流恢复用户值 */
+static void test_quality_defaults_and_restore(void)
+{
+    cam_quality_t q;
+    cam_quality_init(&q, 12);
+    TEST_ASSERT_EQUAL_INT(12, q.effective);
+    TEST_ASSERT_FALSE(cam_quality_restore(&q));
+
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 5, 20, 250));
+    TEST_ASSERT_EQUAL_INT(14, q.effective);
+    TEST_ASSERT_TRUE(cam_quality_restore(&q));
+    TEST_ASSERT_EQUAL_INT(12, q.effective);
+}
+
+/* 10. 帧率到下限仍发不完：每次加 2，最多比用户值高 MAX_DELTA */
+static void test_quality_backs_off_to_limit(void)
+{
+    cam_quality_t q;
+    cam_quality_init(&q, 12);
+    for (int i = 0; i < 10; i++) {
+        (void)cam_quality_evaluate(&q, true, true, 5, 20, 300);
+    }
+    TEST_ASSERT_EQUAL_INT(12 + CAM_QUALITY_MAX_DELTA, q.effective);
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+}
+
+/* 11. 网络恢复要连续两个快窗口才还一档，中间窗口打断计数 */
+static void test_quality_recovers_after_two_fast_windows(void)
+{
+    cam_quality_t q;
+    cam_quality_init(&q, 12);
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+    TEST_ASSERT_EQUAL_INT(16, q.effective);
+
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, true, true, 20, 20, 20));
+    TEST_ASSERT_EQUAL_INT(16, q.effective);
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, true, true, 20, 20, 120));
+    TEST_ASSERT_EQUAL_INT(0, q.fast_windows);
+
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, true, true, 20, 20, 20));
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 20, 20, 20));
+    TEST_ASSERT_EQUAL_INT(14, q.effective);
+}
+
+/* 12. 用户值接近传感器上限时，自适应不越过 63 */
+static void test_quality_clamps_at_sensor_max(void)
+{
+    cam_quality_t q;
+    cam_quality_init(&q, 60);
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+    TEST_ASSERT_EQUAL_INT(CAM_QUALITY_MAX, q.effective);
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+}
+
+/* 13. 没有流或没有发送样本时不动画质 */
+static void test_quality_ignores_idle_or_no_samples(void)
+{
+    cam_quality_t q;
+    cam_quality_init(&q, 12);
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, false, false, 5, 20, 300));
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, true, false, 5, 20, 0));
+    TEST_ASSERT_EQUAL_INT(12, q.effective);
+}
+
+/* 14. 平均 0ms 是有效的快速样本，画质必须能恢复；不能当成"没有样本" */
+static void test_quality_zero_avg_is_valid_fast_sample(void)
+{
+    cam_quality_t q;
+    cam_quality_init(&q, 12);
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 5, 20, 300));
+    TEST_ASSERT_EQUAL_INT(16, q.effective);
+
+    TEST_ASSERT_FALSE(cam_quality_evaluate(&q, true, true, 20, 20, 0));
+    TEST_ASSERT_TRUE(cam_quality_evaluate(&q, true, true, 20, 20, 0));
+    TEST_ASSERT_EQUAL_INT(14, q.effective);
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_defaults_and_cap_clamp, "test_defaults_and_cap_clamp", __LINE__);
     UnityDefaultTestRun(test_startup_grace_and_slow_backoff, "test_startup_grace_and_slow_backoff", __LINE__);
@@ -189,4 +271,10 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_medium_window_breaks_fast_streak, "test_medium_window_breaks_fast_streak", __LINE__);
     UnityDefaultTestRun(test_reset_window_drops_pending_samples, "test_reset_window_drops_pending_samples", __LINE__);
     UnityDefaultTestRun(test_cap_change_during_stream, "test_cap_change_during_stream", __LINE__);
+    UnityDefaultTestRun(test_quality_defaults_and_restore, "test_quality_defaults_and_restore", __LINE__);
+    UnityDefaultTestRun(test_quality_backs_off_to_limit, "test_quality_backs_off_to_limit", __LINE__);
+    UnityDefaultTestRun(test_quality_recovers_after_two_fast_windows, "test_quality_recovers_after_two_fast_windows", __LINE__);
+    UnityDefaultTestRun(test_quality_clamps_at_sensor_max, "test_quality_clamps_at_sensor_max", __LINE__);
+    UnityDefaultTestRun(test_quality_ignores_idle_or_no_samples, "test_quality_ignores_idle_or_no_samples", __LINE__);
+    UnityDefaultTestRun(test_quality_zero_avg_is_valid_fast_sample, "test_quality_zero_avg_is_valid_fast_sample", __LINE__);
 )

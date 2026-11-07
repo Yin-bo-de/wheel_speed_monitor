@@ -17,6 +17,8 @@ static const char *TAG = "benchcam";
 /* 控制器是独立纯 C 组件，帧率边界必须和配置校验保持一致。 */
 _Static_assert(CAM_RATE_FPS_MIN == CFG_CAM_FPS_MIN, "cam_rate min fps mismatch");
 _Static_assert(CAM_RATE_FPS_MAX == CFG_CAM_FPS_MAX, "cam_rate max fps mismatch");
+_Static_assert(CAM_QUALITY_MIN == CFG_CAM_QUALITY_MIN, "quality min mismatch");
+_Static_assert(CAM_QUALITY_MAX == CFG_CAM_QUALITY_MAX, "quality max mismatch");
 
 #define CAM_IDLE_POLL_MS 20
 #define CAM_PREVIEW_HOLD_MS 30000
@@ -60,7 +62,16 @@ static SemaphoreHandle_t s_lock;
 static cam_state_t s_state = CAM_IDLE;
 static uint32_t s_applied_policy = CFG_CAM_POLICY_ON_DEMAND;
 static uint32_t s_applied_res = CFG_CAM_RES_QVGA;
-static uint32_t s_applied_quality = 12;
+static uint32_t s_applied_quality = 12; /* 用户配置值 */
+/* 自适应画质：帧率到下限仍拥堵时提高 quality 数值（压缩更强、帧更小），
+ * 网络恢复后还回用户配置。决策在纯 C 的 cam_quality 里，本文件只负责
+ * 把结果写进传感器。 */
+static cam_quality_t s_quality;
+static bool s_quality_pending; /* 待 cam_publish_task 写入传感器 */
+static bool s_quality_auto_ok = true;
+static uint32_t s_quality_fail_count;
+/* 连续写失败这么多次就停掉自适应画质，避免每轮循环都去打扰 SCCB。 */
+#define CAM_QUALITY_FAIL_LIMIT 3
 static uint32_t s_cached_overlay = CFG_CAM_OVERLAY_ALL;
 static cam_rate_t s_rate;
 /* 用户在设置页配的上限。控制器实际用的上限还要和实测 base 取小，
@@ -102,6 +113,10 @@ static uint32_t s_big_frame_drops; /* 帧大于发布缓冲：限频打印，别
  * base 会随光照、AEC 曝光时间变化，不能只测一次：未限速时用实际帧率
  * 滚动更新；限速时定期恢复默认时序重测。 */
 static uint32_t s_base_fps;
+/* base 是单向下行的棘轮：一旦被误拉低，target 跟着低，观测就再也回不到
+ * 原来的值。下降要连续两个 5 秒窗口确认，单次抖动只记一笔。 */
+#define CAM_BASE_LOW_CONFIRM 2
+static uint32_t s_base_low_streak;
 static uint32_t s_sensor_fps_applied;
 static bool s_fps_calibrated;
 static bool s_sensor_fps_ok;
@@ -143,6 +158,25 @@ static void apply_rate_cap_locked(void)
         cap = s_base_fps;
     }
     cam_rate_set_cap(&s_rate, cap);
+}
+
+/* 相机重新开始或用户改配置：自适应画质回到用户值，失败计数清零。 */
+static void reset_quality_state(uint8_t user_quality)
+{
+    cam_quality_init(&s_quality, user_quality);
+    s_quality_pending = false;
+    s_quality_auto_ok = true;
+    s_quality_fail_count = 0;
+}
+
+/* 每 5 秒评估一次，调用时 s_lock 已持有。返回 true 表示画质变了。 */
+static bool adapt_quality_locked(void)
+{
+    return cam_quality_evaluate(&s_quality, s_rate.stream_active,
+                                s_rate.last_avg_valid,
+                                cam_rate_effective(&s_rate),
+                                cam_rate_cap(&s_rate),
+                                s_rate.last_avg_ms);
 }
 
 static const char *state_str(cam_state_t st)
@@ -266,6 +300,10 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
     uint32_t cap_snapshot = 0;
     uint32_t base_log_old = 0;
     uint32_t base_log_new = 0;
+    bool log_quality = false;
+    uint32_t quality_log_old = 0;
+    uint32_t quality_log_new = 0;
+    uint32_t avg_send_snapshot = 0;
     lock();
     /* 能拿到帧就说明传感器还在出数据，失败计数清零；帧太大只是发布缓冲
      * 不够，不该和"取帧超时"混成同一个故障。 */
@@ -315,16 +353,39 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
                                         ? observed - s_base_fps
                                         : s_base_fps - observed;
                     if (observed >= 1 && diff >= 2) {
-                        base_log_old = s_base_fps;
-                        base_log_new = observed;
-                        s_base_fps = observed;
-                        s_base_last_ms = now;
-                        s_base_dirty = true;
-                        apply_rate_cap_locked();
-                        /* 上限可能刚被压低，日志按夹后的值打印 */
-                        target_snapshot = cam_rate_effective(&s_rate);
-                        cap_snapshot = cam_rate_cap(&s_rate);
-                        log_base = true;
+                        if (observed < s_base_fps &&
+                            s_base_low_streak < CAM_BASE_LOW_CONFIRM) {
+                            s_base_low_streak++;
+                        } else {
+                            base_log_old = s_base_fps;
+                            base_log_new = observed;
+                            s_base_fps = observed;
+                            s_base_last_ms = now;
+                            s_base_dirty = true;
+                            s_base_low_streak = 0;
+                            apply_rate_cap_locked();
+                            /* 上限可能刚被压低，日志按夹后的值打印 */
+                            target_snapshot = cam_rate_effective(&s_rate);
+                            cap_snapshot = cam_rate_cap(&s_rate);
+                            log_base = true;
+                        }
+                    } else {
+                        s_base_low_streak = 0;
+                    }
+                }
+
+                if (s_quality_auto_ok) {
+                    uint32_t q_before = s_quality.effective;
+                    if (adapt_quality_locked()) {
+                        log_quality = true;
+                        quality_log_old = q_before;
+                        quality_log_new = s_quality.effective;
+                        avg_send_snapshot = s_rate.last_avg_ms;
+                    }
+                    /* 目标值和传感器实际值不一致：上次写失败，等下一个
+                     * 5 秒窗口再试，不要在循环里反复打扰 SCCB。 */
+                    if (s_quality.effective != s_quality.applied) {
+                        s_quality_pending = true;
                     }
                 }
             }
@@ -345,6 +406,11 @@ static void publish_frame(const camera_drv_frame_t *frame, uint32_t now)
     if (log_base) {
         ESP_LOGI(TAG, "base observed: %lu -> %lu fps",
                  (unsigned long)base_log_old, (unsigned long)base_log_new);
+    }
+    if (log_quality) {
+        ESP_LOGI(TAG, "auto quality: %lu -> %lu (user %lu, avg_send %lu ms)",
+                 (unsigned long)quality_log_old, (unsigned long)quality_log_new,
+                 (unsigned long)s_applied_quality, (unsigned long)avg_send_snapshot);
     }
 
     /* 通知放在锁外：发送侧不在锁内做任何事，这里也不持锁做调度操作。
@@ -367,6 +433,7 @@ static void reset_calib_state(void)
     s_calib_gap_count = 0;
     s_base_last_ms = 0;
     s_base_dirty = false;
+    s_base_low_streak = 0;
     s_next_grab_ms = 0;
 }
 
@@ -535,8 +602,15 @@ static void cam_task(void *arg)
         bool idle_to_off = false;
         uint32_t init_res = 0, init_quality = 0;
         uint32_t fps_to_apply = 0;
+        uint32_t quality_to_apply = 0;
 
         lock();
+
+        /* 自适应画质的寄存器写入只能在相机任务里做，评估在发布帧时完成。 */
+        if (s_quality_pending && s_state == CAM_ON && !s_ota_suspend) {
+            quality_to_apply = s_quality.effective;
+            s_quality_pending = false;
+        }
 
         if (have_cfg) {
             s_cached_overlay = cfg_overlay;
@@ -583,6 +657,8 @@ static void cam_task(void *arg)
             if (cfg_res != s_applied_res || cfg_quality != s_applied_quality) {
                 s_applied_res = cfg_res;
                 s_applied_quality = cfg_quality;
+                /* 用户改了画质就把自适应偏移清零，新配置是新的基准。 */
+                reset_quality_state((uint8_t)cfg_quality);
                 /* 有流或 always：立即重 init，旧流由流任务结束；没有流且不在
                  * 采集中：先回 idle，等下一次请求按新参数 init。 */
                 if (s_state == CAM_ON || s_state == CAM_INIT) {
@@ -681,6 +757,35 @@ static void cam_task(void *arg)
 
         unlock();
 
+        if (quality_to_apply != 0) {
+            if (camera_drv_set_quality(quality_to_apply) != ESP_OK) {
+                lock();
+                s_quality_fail_count++;
+                if (s_quality_auto_ok && s_quality_fail_count >= CAM_QUALITY_FAIL_LIMIT) {
+                    /* 连续失败说明这条链路有问题，关掉自适应并尝试把用户值
+                     * 写回去一次；再失败也不再自动重试。 */
+                    s_quality_auto_ok = false;
+                    cam_quality_restore(&s_quality);
+                    s_quality_pending = s_quality.effective != s_quality.applied;
+                    s_quality_fail_count = 0;
+                } else {
+                    /* 普通失败等下一个 5 秒评估窗口再试，不在这里空转。 */
+                    s_quality_pending = false;
+                }
+                unlock();
+            } else {
+                /* 写寄存器不持锁；这期间用户改配置或断流可能把目标值改了，
+                 * 发现不一致就再排一次，让下一轮写新值。 */
+                lock();
+                s_quality.applied = (uint8_t)quality_to_apply;
+                s_quality_fail_count = 0;
+                if (s_quality.effective != quality_to_apply) {
+                    s_quality_pending = true;
+                }
+                unlock();
+            }
+        }
+
         switch (action) {
         case ACT_DEINIT:
             (void)camera_drv_deinit();
@@ -690,6 +795,7 @@ static void cam_task(void *arg)
             cam_rate_stream_stop(&s_rate, now_ms());
             /* 新的相机会话（下一次 init）从用户上限重新起步，校准后再夹到 base。 */
             apply_rate_cap_locked();
+            reset_quality_state((uint8_t)s_applied_quality);
             if (idle_to_off) {
                 ESP_LOGI(TAG, "camera off");
             } else {
@@ -743,6 +849,8 @@ static void cam_task(void *arg)
                 s_fps_window_ms = ready_ms;
                 s_fps_frames = 0;
                 s_last_frame_ms = 0;
+                /* 新会话从用户配置的画质起步，自适应重新开始。 */
+                reset_quality_state((uint8_t)init_quality);
                 s_init_requested = false; /* 本次 init 已满足发起它的请求 */
                 reset_calib_state();
                 s_sensor_fps_ok = camera_drv_fps_control_supported();
@@ -837,6 +945,7 @@ esp_err_t bench_cam_start(cfg_params_t *cfg, SemaphoreHandle_t cfg_mutex)
     s_applied_policy = cfg->cam_policy;
     s_applied_res = cfg->cam_res;
     s_applied_quality = cfg->cam_quality;
+    reset_quality_state((uint8_t)cfg->cam_quality);
     s_user_fps_cap = cfg->cam_fps_cap;
     cam_rate_init(&s_rate, cfg->cam_fps_cap);
     s_cached_overlay = cfg->overlay_mask;
@@ -904,6 +1013,11 @@ void bench_cam_stream_release(void)
      * 由 cam_rate 的 recovery 慢慢升回去；相机 deinit 时才恢复用户上限。
      * always 没有流时不存在网络压力，直接回到当前上限。 */
     cam_rate_stream_stop(&s_rate, now_ms());
+    /* 断流后预览没有网络压力，把自适应压低的画质还给用户配置；
+     * 实际寄存器写入由 cam_task 做。 */
+    if (cam_quality_restore(&s_quality)) {
+        s_quality_pending = true;
+    }
     if (s_applied_policy == CFG_CAM_POLICY_ALWAYS) {
         apply_rate_cap_locked();
     }
@@ -1142,6 +1256,7 @@ void bench_cam_get_status(telem_cam_status_t *out)
     out->clients = s_stream_active ? 1 : 0;
     out->res = res_str(s_applied_res);
     out->quality = (uint8_t)s_applied_quality;
+    out->quality_eff = s_quality.applied;
     out->fps_cap = (uint8_t)cam_rate_cap(&s_rate);
     out->fps_user_cap = (uint8_t)s_user_fps_cap;
     out->fps_eff = (uint8_t)cam_rate_effective(&s_rate);

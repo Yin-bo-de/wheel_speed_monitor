@@ -888,7 +888,12 @@ function camStatusText(cam) {
   const fpsTxt = eff < cap
     ? `采集 ${eff}fps（${capNote}，自动降速）`
     : `采集 ${cap}fps（${capNote}）`;
-  const spec = `${(cam.res || "qvga").toUpperCase()} · ${fpsTxt} · q${cam.quality || 12}`;
+  /* quality 是用户配置，quality_eff 是网络自适应后的实际值；只有被
+   * 自动压低画质时才把两个值都显示出来。 */
+  const q = cam.quality || 12;
+  const qEff = cam.quality_eff || q;
+  const qualityTxt = qEff !== q ? `q${q}→q${qEff}（自动降画质）` : `q${q}`;
+  const spec = `${(cam.res || "qvga").toUpperCase()} · ${fpsTxt} · ${qualityTxt}`;
   if (cam.state === "off") return "相机已关闭";
   if (cam.state === "fail") return "相机初始化失败，看串口日志";
   if (cam.state === "init") return "相机启动中…";
