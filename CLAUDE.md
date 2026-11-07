@@ -71,7 +71,8 @@ ctest --test-dir tests/native/build --output-on-failure
   `docs/CAMERA_DESIGN.md` 4.5.1，改之前先读。相机不是采集器：像素走自己的
   HTTP 端点，只有状态和配置回显进 `telemetry` 的 `sys.cam`。
 - **相机帧率在采集侧控制**：`camera_drv` 按实测基准改 OV2640 的 CLKRC / OV5640
-  的 VTS；网络自适应由纯 C 的 `cam_rate` 计算有效帧率，修改也要给它补宿主机测试。
+  的 VTS（OV5640 在 S3 上还要接管 PLL 并重算 anti-banding）；网络自适应由纯 C
+  的 `cam_rate` 计算有效帧率和自适应 JPEG 画质，修改也要给它补宿主机测试。
 - **OTA 写 flash 会停 cache**：升级在 httpd 任务里同步跑，不新增任务。写入前
   必须 `bench_cam_suspend_for_ota()` 停相机和 MJPEG，并让 `ws_push_task` 通过
   `bench_ota_busy()` 跳过广播；采样和舵机不停（PCNT/LEDC 是硬件计数，短暂停
@@ -122,7 +123,7 @@ main（编排/任务/WiFi/httpd）
  ├─ rc_capture       GPIO 双沿中断测遥控脉宽（IDF 依赖）
  │                   └─ 与验证台模拟注入共用同一个 rc_input 模型，按配置二选一
  ├─ camera_drv       板载 DVP 相机的 esp32-camera 薄封装 + 传感器帧率（IDF 依赖）
- ├─ cam_rate         网络自适应帧率控制器（纯 C，宿主机可测）
+ ├─ cam_rate         网络自适应帧率与画质控制器（纯 C，宿主机可测）
  ├─ bench_cam        相机生命周期 / 发布缓冲 / cam_publish_task（IDF 依赖）
  │  └─ bench_cam_stream  /cam/stream 异步 MJPEG 与 /cam/snapshot（IDF 依赖）
  └─ bench_ota        OTA 上传 / 校验 / 回退端点（IDF 依赖，跑在 httpd 任务里）
