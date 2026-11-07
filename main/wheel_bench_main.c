@@ -471,6 +471,7 @@ static void ws_push_task(void *arg)
             w->speed_km_h = u->chan.math.speed_km_h;
             w->freq_hz = u->chan.math.freq_hz;
             w->pulses = u->chan.pulses_total;
+            w->suspect = u->chan.suspect_count;
             w->trigger = u->chan.trigger;
         }
 

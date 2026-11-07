@@ -23,11 +23,12 @@ esp_err_t wheel_render_block(const wheel_render_state_t *rs,
     for (int i = 0; i < WHEEL_RENDER_COUNT; i++) {
         const wheel_render_wheel_t *w = &rs->wheels[i];
         RENDER_SNPRINTF("%s{\"i\":%d,\"en\":%s,\"rpm\":%.1f,\"rps\":%.2f,"
-                        "\"speed_cms\":%.1f,\"freq\":%.3f,\"pulses\":%lu,\"trigger\":%s}",
+                        "\"speed_cms\":%.1f,\"freq\":%.3f,\"pulses\":%lu,"
+                        "\"suspect\":%lu,\"trigger\":%s}",
                         i ? "," : "",
                         i, w->enabled ? "true" : "false",
                         w->rpm, w->rps, w->speed_cm_s, w->freq_hz,
-                        (unsigned long)w->pulses,
+                        (unsigned long)w->pulses, (unsigned long)w->suspect,
                         w->trigger ? "true" : "false");
     }
 

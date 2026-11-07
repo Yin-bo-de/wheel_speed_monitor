@@ -39,6 +39,7 @@ static void test_all_required_fields(void)
     assert_contains(buf, "\"alpha\":");
     assert_contains(buf, "\"sim\":");
     assert_contains(buf, "\"sim_rpm\":[");
+    assert_contains(buf, "\"suspect\":");
 }
 
 /* 2. 浮点固定小数位（如 %.1f），不随 locale 变化 */
@@ -114,6 +115,17 @@ static void test_debounce_echoed(void)
     assert_contains(buf, "\"debounce_ms\":25");
 }
 
+/* 8. 可疑间隔计数渲染（假脉冲诊断，前端按轮显示） */
+static void test_suspect_count_rendered(void)
+{
+    fresh();
+    rs.wheels[2].suspect = 3;
+    char buf[600];
+    size_t used = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, wheel_render_block(&rs, buf, sizeof(buf), &used));
+    assert_contains(buf, "\"suspect\":3");
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_all_required_fields, "test_all_required_fields", __LINE__);
     UnityDefaultTestRun(test_float_format_fixed, "test_float_format_fixed", __LINE__);
@@ -122,4 +134,5 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_deterministic_render, "test_deterministic_render", __LINE__);
     UnityDefaultTestRun(test_rps_rendered, "test_rps_rendered", __LINE__);
     UnityDefaultTestRun(test_debounce_echoed, "test_debounce_echoed", __LINE__);
+    UnityDefaultTestRun(test_suspect_count_rendered, "test_suspect_count_rendered", __LINE__);
 )

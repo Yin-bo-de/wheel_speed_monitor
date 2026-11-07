@@ -190,6 +190,257 @@ static void test_revive_after_idle(void)
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
 }
 
+/* ---- 间隔切分合并（相机时钟耦合假脉冲） ---- */
+
+static uint32_t g_now;
+
+/* 喂一个间隔，按 50ms 采样节拍推进时间。
+ * 返回它是否真的被数学层采纳：未上报时 last_pulse_ms 不刷新。 */
+static bool feed_period(uint32_t interval_us)
+{
+    g_now += 50;
+    uint32_t before = st.math.last_pulse_ms;
+    (void)wheel_chan_sample_period(&st, &cfg, interval_us, g_now);
+    return st.math.last_pulse_ms != before;
+}
+
+/* 14. 正常等间隔序列：每次都照常上报，不挂起、不累计可疑计数 */
+static void test_stable_sequence_unchanged(void)
+{
+    fresh();
+    g_now = 1000;
+    for (int i = 0; i < 12; i++) {
+        TEST_ASSERT_TRUE(feed_period(1000000u));
+    }
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.math.freq_hz);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 60.0f, st.math.rpm_ema);
+    TEST_ASSERT_EQUAL_UINT32(0, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
+}
+
+/* 15. 假脉冲切分 150+850：短片段挂起，与 850 合并回 1000ms，
+ * 不把 150ms（400 RPM）当真实转速上报 */
+static void test_split_150_850_merged(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_FALSE(feed_period(150000u));
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(150000u, st.pending_interval_us);
+    TEST_ASSERT_TRUE(feed_period(850000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.math.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
+}
+
+/* 16. 假脉冲切分 400+600：400 挂起，600 到来后合并回 1000ms */
+static void test_split_400_600_merged(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_FALSE(feed_period(400000u));
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_TRUE(feed_period(600000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.math.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
+}
+
+/* 17. 假脉冲落在 850ms 处（850 先到、150 后到）：150 到来时触发长段回滚，
+ * 850+150 合并回 1000ms 重放，400 RPM 尖峰与 +3 RPM 台阶都不出现 */
+static void test_split_850_150_no_spike(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_TRUE(feed_period(850000u)); /* 长片段先按正常间隔上报，约 70 RPM */
+    TEST_ASSERT_TRUE(feed_period(150000u)); /* 回滚：撤销 850，按 1000 重放 */
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 60.0f, st.math.rpm_ema);
+    /* 回到真实周期后继续保持稳定 */
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.math.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
+}
+
+/* 18. 真实缓加速 1000→900→810：每段都超过上一步的一半，不挂起、不合并 */
+static void test_slow_accel_not_merged(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_TRUE(feed_period(900000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1000000.0f / 900000.0f, st.math.freq_hz);
+    TEST_ASSERT_TRUE(feed_period(810000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1000000.0f / 810000.0f, st.math.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(0, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+}
+
+/* 19. 挂起后停转：1.5×上次有效间隔后丢弃挂起并清空合并基准，
+ * 2s 静止兜底把 RPM 归零；恢复时按首样本直采，不被旧基准误挂起 */
+static void test_pending_then_stop_zeroes(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u)); /* 基准，last_pulse_ms=1050 */
+    TEST_ASSERT_FALSE(feed_period(150000u)); /* 挂起，pending_since=1100 */
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+
+    /* 停转：计数不变，采样任务继续按 50ms 节拍推进 sample */
+    wheel_chan_sample(&st, &cfg, 0, 1100);
+    wheel_chan_sample(&st, &cfg, 0, 2650); /* 挂起年龄 1550ms > 1.5s */
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(0, st.last_valid_interval_us);
+    wheel_chan_sample(&st, &cfg, 0, 3150); /* 距上次有效脉冲 2100ms > 2s */
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.rpm_ema);
+    TEST_ASSERT_FALSE(st.math.has_sample);
+
+    /* 恢复：无合并基准，即使新间隔远短于停转前，也按首样本直采 */
+    g_now = 3150;
+    TEST_ASSERT_TRUE(feed_period(100000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count); /* 恢复不算可疑 */
+}
+
+/* 20. 连续两个假脉冲（150 + 250，真实 1000）：150 挂起后与 250 相加
+ * 明显偏离基准，不得错误合并；当前 250 正常上报，随后回到真实周期 */
+static void test_two_fakes_no_wrong_merge(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_FALSE(feed_period(150000u));
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_TRUE(feed_period(250000u)); /* 挂起+250=400，不合并 */
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 4.0f, st.math.freq_hz); /* 250ms → 240 RPM */
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(250000u, st.last_valid_interval_us);
+    TEST_ASSERT_TRUE(feed_period(600000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1000000.0f / 600000.0f, st.math.freq_hz);
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.math.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count); /* 全程只挂起过一次 */
+}
+
+/* 21. 首样本（无基准）：短间隔也直接采纳，不触发挂起 */
+static void test_first_sample_never_held(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(100000u));
+    TEST_ASSERT_EQUAL_UINT32(0, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
+}
+
+/* 22. 挂起期间同一间隔被采样任务重复轮询：不重复计数、不上报；
+ * 真搭档到来时仍能合并（真实源每 50ms 都会重读同一个间隔） */
+static void test_pending_repeat_poll_ignored(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_FALSE(feed_period(150000u));
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_FALSE(feed_period(150000u));
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_TRUE(feed_period(850000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.math.freq_hz);
+}
+
+/* ---- 长段回滚修正（假脉冲先切出长段的场景） ---- */
+
+/* 23. 假脉冲落在 857ms（长段先上报）：长段单独算频会把 EMA 抬到约 63 RPM，
+ * 短段 143ms 到来时确认 857+143 回到上上段 1000ms → 撤销长段上报并重放，
+ * EMA 立即回到 60，消除 +3 RPM 的显示台阶。 */
+static void test_long_segment_rollback(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_TRUE(feed_period(857000u));
+    /* 台阶来源：长段被当成真实周期，EMA 从 60 抬到约 63 */
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 63.0f, st.math.rpm_ema);
+    TEST_ASSERT_TRUE(feed_period(143000u));
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.prev_valid_interval_us); /* 回滚不推进 prev */
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 60.0f, st.math.rpm_ema);
+}
+
+/* 24. 双假脉冲：长段 857 上报后 100 触发回滚（合并 957）；
+ * 紧跟的 43 只比 1000 短 4.3%，不满足回滚前提，走原挂起与 900 合并成 943。
+ * 全程无 240+ RPM 尖峰，终值仍收敛在 60 附近。 */
+static void test_rollback_two_fakes(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_TRUE(feed_period(857000u));
+    TEST_ASSERT_TRUE(feed_period(100000u)); /* 回滚：857+100=957 重放 */
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(957000u, st.last_valid_interval_us);
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 60.0f, st.math.rpm_ema);
+
+    TEST_ASSERT_FALSE(feed_period(43000u)); /* 957 不短于上上段 10%，只挂起 */
+    TEST_ASSERT_EQUAL_UINT32(2, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(43000u, st.pending_interval_us);
+    TEST_ASSERT_TRUE(st.math.rpm_ema < 65.0f);
+
+    TEST_ASSERT_TRUE(feed_period(900000u)); /* 43+900=943 落在 957±25% → 合并 */
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(943000u, st.last_valid_interval_us);
+    /* alpha=0.3 下 EMA 逐步收敛，尚未完全回到 60，但从未出现 240+ 尖峰 */
+    TEST_ASSERT_FLOAT_WITHIN(2.0f, 60.0f, st.math.rpm_ema);
+}
+
+/* 25. 短段先到：上段 1000 不短于上上段（无 prev 参照），150 只挂起不回滚，
+ * math 停在 60；850 到来后按原合并路径回到 1000ms。 */
+static void test_short_first_no_rollback(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_FALSE(feed_period(150000u));
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(150000u, st.pending_interval_us);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 60.0f, st.math.rpm_ema); /* 未回滚，math 不动 */
+    TEST_ASSERT_TRUE(feed_period(850000u));
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 60.0f, st.math.rpm_ema);
+}
+
+/* 26. 真加速边界：850 上报（比上上段 1000 短 15%），下段 400ms 与它相加
+ * 恰好 1250ms，压在上上段 +25% 窗口上沿（1000×5/4=1250，开区间不包含）
+ * → 不触发回滚，按原逻辑挂起；600 到来合并成 1000ms。 */
+static void test_accel_border_no_rollback(void)
+{
+    fresh();
+    g_now = 1000;
+    TEST_ASSERT_TRUE(feed_period(1000000u));
+    TEST_ASSERT_TRUE(feed_period(850000u));
+    TEST_ASSERT_FALSE(feed_period(400000u));
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+    TEST_ASSERT_EQUAL_UINT32(400000u, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(850000u, st.last_valid_interval_us); /* 未被回滚改写 */
+    TEST_ASSERT_TRUE(feed_period(600000u)); /* 400+600=1000 落在 850±25% */
+    TEST_ASSERT_EQUAL_UINT32(0, st.pending_interval_us);
+    TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, st.math.freq_hz);
+    TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_normal_increment, "test_normal_increment", __LINE__);
     UnityDefaultTestRun(test_wraparound, "test_wraparound", __LINE__);
@@ -205,4 +456,17 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_period_zero_interval, "test_period_zero_interval", __LINE__);
     UnityDefaultTestRun(test_idle_timeout_zeroes, "test_idle_timeout_zeroes", __LINE__);
     UnityDefaultTestRun(test_revive_after_idle, "test_revive_after_idle", __LINE__);
+    UnityDefaultTestRun(test_stable_sequence_unchanged, "test_stable_sequence_unchanged", __LINE__);
+    UnityDefaultTestRun(test_split_150_850_merged, "test_split_150_850_merged", __LINE__);
+    UnityDefaultTestRun(test_split_400_600_merged, "test_split_400_600_merged", __LINE__);
+    UnityDefaultTestRun(test_split_850_150_no_spike, "test_split_850_150_no_spike", __LINE__);
+    UnityDefaultTestRun(test_slow_accel_not_merged, "test_slow_accel_not_merged", __LINE__);
+    UnityDefaultTestRun(test_pending_then_stop_zeroes, "test_pending_then_stop_zeroes", __LINE__);
+    UnityDefaultTestRun(test_two_fakes_no_wrong_merge, "test_two_fakes_no_wrong_merge", __LINE__);
+    UnityDefaultTestRun(test_first_sample_never_held, "test_first_sample_never_held", __LINE__);
+    UnityDefaultTestRun(test_pending_repeat_poll_ignored, "test_pending_repeat_poll_ignored", __LINE__);
+    UnityDefaultTestRun(test_long_segment_rollback, "test_long_segment_rollback", __LINE__);
+    UnityDefaultTestRun(test_rollback_two_fakes, "test_rollback_two_fakes", __LINE__);
+    UnityDefaultTestRun(test_short_first_no_rollback, "test_short_first_no_rollback", __LINE__);
+    UnityDefaultTestRun(test_accel_border_no_rollback, "test_accel_border_no_rollback", __LINE__);
 )

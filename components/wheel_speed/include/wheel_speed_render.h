@@ -31,6 +31,7 @@ typedef struct {
     float speed_km_h;    /* 线速度 km/h */
     float freq_hz;       /* 脉冲频率 */
     uint32_t pulses;     /* 累计脉冲 */
+    uint32_t suspect;    /* 可疑间隔累计次数（假脉冲切分诊断） */
     bool trigger;        /* 最近窗口有脉冲 */
 } wheel_render_wheel_t;
 

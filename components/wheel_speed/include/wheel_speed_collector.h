@@ -37,6 +37,16 @@ typedef struct {
     wsmath_state_t math;          /* 数学层状态（EMA/频率/线速度），由 sample_period 维护 */
     bool trigger;                 /* 本窗口是否有脉冲增量 */
     bool has_baseline;            /* 是否已建立首窗口基准 */
+
+    /* 间隔切分合并：相机时钟耦合进霍尔线产生的假脉冲会把一个真实轮周期
+     * 切成两段，短的那段单独测频就是几百 RPM 的尖峰。短片段先挂起，
+     * 下一个间隔到来时再决定合并还是丢弃。 */
+    uint32_t last_valid_interval_us; /* 最近一次确认有效的间隔（合并基准；0=无基准） */
+    uint32_t prev_valid_interval_us; /* 上上段有效间隔：长段回滚判定基准；0=无 */
+    wsmath_state_t math_snapshot;    /* 上次正常上报前的 math 副本，回滚时恢复 */
+    uint32_t pending_interval_us;    /* 挂起中的可疑短间隔；0=无挂起 */
+    uint32_t pending_since_ms;       /* 挂起时刻，用于超时丢弃 */
+    uint32_t suspect_count;          /* 可疑间隔累计次数（诊断遥测） */
 } wheel_chan_state_t;
 
 /*
@@ -59,6 +69,19 @@ void wheel_chan_reset_baseline(wheel_chan_state_t *st, uint16_t current_counter)
  * 脉冲间隔测频法：interval_us 为相邻两次脉冲的时间间隔（微秒）。
  * 频率 = 1e6/interval_us（Hz），RPM = 频率×60/磁铁数，走 EMA。
  * 间隔为 0 返回 ESP_ERR_INVALID_ARG 且状态不变。
+ *
+ * 间隔切分合并（防相机时钟耦合产生的假脉冲）：
+ * - 首样本（last_valid_interval_us==0）直接采纳，不挂起；
+ * - 新间隔短于上次有效间隔的一半 → 先做长段回滚判定，再挂起不报；
+ *   suspect_count++，同一间隔的重复轮询不算新事件；
+ * - 长段回滚：上一段比上上段短 10% 以上、且上一段与当前短段之和落在
+ *   上上段 ±25% 内 → 恢复上一段上报前的 math 快照，按合并值重放后返回；
+ * - 回滚不成立则挂起；下一个间隔到来时，挂起值与它之和落在上次有效间隔
+ *   ±25% 内 → 合并上报；
+ * - 合并不成立 → 丢弃挂起，当前间隔正常上报；
+ * - 挂起超过上次有效间隔的 1.5 倍仍无新事件 → 丢弃挂起并清空合并基准，
+ *   之后首个间隔按首样本直采（停转由 IDLE_TIMEOUT_LONG_MS 归零）。
+ * - 挂起超时、静止归零、换源重置同时清空回滚参照（prev 与 math 快照）。
  */
 esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
                                    uint32_t interval_us, uint32_t now_ms);

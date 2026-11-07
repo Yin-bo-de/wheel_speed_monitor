@@ -108,7 +108,7 @@
   .cam-wrap.pseudo-fullscreen img { width:100%; height:100%; max-height:none; object-fit:contain; }
   .cam-wrap.pseudo-fullscreen .cam-fs-exit { display:block; }
   body.cam-fs-lock { overflow:hidden; }
-  /* 切到设置 tab 时不把预览卡移出渲染树（display:none 会让浏览器停读 MJPEG），
+  /* 切走图传 tab 时不把预览卡移出渲染树（display:none 会让浏览器停读 MJPEG），
      只把它移出布局并设为全透明；30 秒保持靠这条规则活着。 */
   section.tab-passive { position:absolute; top:0; left:0; width:100%; opacity:0;
     pointer-events:none; }
@@ -141,6 +141,7 @@
 
 <nav class="tabs">
   <button class="tab active" data-tab="monitor">监测</button>
+  <button class="tab" data-tab="camera">图传</button>
   <button class="tab" data-tab="settings">设置</button>
 </nav>
 
@@ -148,33 +149,6 @@
 <section id="view-monitor">
   <h2>四轮仪表</h2>
   <div class="grid grid-4" id="wheels"></div>
-
-  <div class="card" style="margin-top:12px" id="cam-card">
-    <h2>画面回传 <span class="note cam-status" id="cam-status">—</span></h2>
-    <div class="cam-wrap" id="cam-wrap">
-      <img id="cam-view" alt="摄像头画面">
-      <canvas id="cam-overlay"></canvas>
-      <div class="cam-hint" id="cam-hint">打开预览后按需启动相机</div>
-      <button id="cam-fs-exit" class="cam-fs-exit" type="button">退出全屏</button>
-    </div>
-    <div class="cam-tools">
-      <label><input type="checkbox" id="ov-wheels" checked> 轮速</label>
-      <label><input type="checkbox" id="ov-servo" checked> 舵机</label>
-      <label><input type="checkbox" id="ov-rc" checked> 遥控</label>
-      <label><input type="checkbox" id="ov-sys" checked> 系统</label>
-      <label><input type="checkbox" id="cam-static"> 静态帧模式</label>
-      <span class="cam-rot-tools">
-        <button id="cam-rot-left" type="button" aria-label="向左旋转 90 度">左转 90°</button>
-        <b id="cam-rot-label" aria-live="polite">0°</b>
-        <button id="cam-rot-right" type="button" aria-label="向右旋转 90 度">右转 90°</button>
-      </span>
-      <span class="spacer"></span>
-      <button id="cam-full" type="button">全屏</button>
-      <button id="cam-snap">原始快照 ⤓</button>
-    </div>
-    <p class="hint">按需采集：打开本页预览才启动相机；切到设置页后流和采集保持 30 秒，
-      30 秒内切回不断流。原始快照不带叠加，叠加层由浏览器绘制。</p>
-  </div>
 
   <h2>轮速曲线（最近 30s，RPM）</h2>
   <canvas id="chart"></canvas>
@@ -200,6 +174,35 @@
     <div class="row" style="margin-top:8px"><span>生效模式</span><b id="rc-mode">—</b></div>
     <p class="hint">模式通道 ≥1500µs 判手动：前后差速原样透传遥控脉宽；&lt;1500µs 判自动：忽略遥控，按轮速算法。
       任一路超时（100ms 没收到脉冲）即判丢信号，那一处单独回落设置页配置，不影响其余通道。</p>
+  </div>
+</section>
+
+<section id="view-camera" class="tab-passive">
+  <div class="card" id="cam-card">
+    <h2>画面回传 <span class="note cam-status" id="cam-status">—</span></h2>
+    <div class="cam-wrap" id="cam-wrap">
+      <img id="cam-view" alt="摄像头画面">
+      <canvas id="cam-overlay"></canvas>
+      <div class="cam-hint" id="cam-hint">打开预览后按需启动相机</div>
+      <button id="cam-fs-exit" class="cam-fs-exit" type="button">退出全屏</button>
+    </div>
+    <div class="cam-tools">
+      <label><input type="checkbox" id="ov-wheels" checked> 轮速</label>
+      <label><input type="checkbox" id="ov-servo" checked> 舵机</label>
+      <label><input type="checkbox" id="ov-rc" checked> 遥控</label>
+      <label><input type="checkbox" id="ov-sys" checked> 系统</label>
+      <label><input type="checkbox" id="cam-static"> 静态帧模式</label>
+      <span class="cam-rot-tools">
+        <button id="cam-rot-left" type="button" aria-label="向左旋转 90 度">左转 90°</button>
+        <b id="cam-rot-label" aria-live="polite">0°</b>
+        <button id="cam-rot-right" type="button" aria-label="向右旋转 90 度">右转 90°</button>
+      </span>
+      <span class="spacer"></span>
+      <button id="cam-full" type="button">全屏</button>
+      <button id="cam-snap">原始快照 ⤓</button>
+    </div>
+    <p class="hint">按需采集：打开本页预览才启动相机；离开本页后流和采集保持 30 秒，
+      30 秒内切回不断流。原始快照不带叠加，叠加层由浏览器绘制。</p>
   </div>
 </section>
 
@@ -338,7 +341,7 @@
     </div>
     <div style="margin-top:8px"><button id="cam-apply">应用画面配置</button></div>
     <p class="hint">帧率上限同时约束传感器采集和发送；网络变差时服务端会自动再降采集帧率，
-      恢复后逐步升回上限。按需模式下打开监测页预览才启动相机；切到设置页后流和采集保持
+      恢复后逐步升回上限。按需模式下打开图传页预览才启动相机；离开图传页后流和采集保持
       30 秒，超时才停。改分辨率/画质时如果正在预览，相机会重启约 1–2 秒。常开是调试入口，
       发热和功耗更高。SVGA 只建议观察用。</p>
   </div>
@@ -416,10 +419,11 @@ function buildPanels() {
     div.className = "card wheel";
     div.innerHTML = `
       <div class="name"><span><span class="trigger" id="trig${i}"></span> ${wheelNames[i]}</span><span class="note" id="en-note${i}"></span></div>
-      <div class="rpm" id="rpm${i}">0.00 <small>转/秒</small></div>
-      <div class="row"><span>RPM</span><b id="rpmraw${i}">0</b><span>线速度</span><b id="spd${i}">0.0</b></div>
+      <div class="rpm" id="rpm${i}">0 <small>RPM</small></div>
+      <div class="row"><span>RPS</span><b id="rps${i}">0.00</b><span>线速度</span><b id="spd${i}">0.0</b></div>
       <div class="row"><span>频率</span><b id="freq${i}">0.000 Hz</b></div>
-      <div class="row"><span>累计脉冲</span><b id="pulses${i}">0</b></div>`;
+      <div class="row"><span>累计脉冲</span><b id="pulses${i}">0</b></div>
+      <div class="row"><span>可疑间隔</span><b id="suspect${i}">0</b></div>`;
     wheels.appendChild(div);
   }
 
@@ -491,17 +495,20 @@ function buildPanels() {
 
 function showTab(name) {
   const prev = activeTab;
-  if (name !== "monitor" && camIsFullscreen()) camExitFullscreen();
+  if (name !== "camera" && camIsFullscreen()) camExitFullscreen();
   activeTab = name;
   if (name === "settings") otaRefresh();
   document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
-  /* 监测页不能设 hidden（display:none 会让浏览器停读 MJPEG）：切走时只把它
-   * 移出布局并隐藏可见性，<img> 仍在渲染树里，服务端的 30 秒保持才有意义。 */
-  $("view-monitor").classList.toggle("tab-passive", name !== "monitor");
+  /* 图传页不能设 hidden（display:none 会让浏览器停读 MJPEG）：切走时只把它
+   * 移出布局并隐藏可见性，<img> 仍在渲染树里，服务端的 30 秒保持才有意义。
+   * 监测页没有持续读取的资源，可以正常 display:none。 */
+  $("view-monitor").hidden = (name !== "monitor");
+  $("view-camera").hidden = false;
+  $("view-camera").classList.toggle("tab-passive", name !== "camera");
   $("view-settings").hidden = (name !== "settings");
   if (prev !== name) {
-    camSendPreview(name === "monitor");
-    if (name === "monitor") {
+    camSendPreview(name === "camera");
+    if (name === "camera") {
       camSyncView();
     } else {
       camPollStop();
@@ -510,6 +517,8 @@ function showTab(name) {
   /* canvas 在隐藏/移出布局时 clientWidth 为 0，切回来必须重算尺寸再重画 */
   if (name === "monitor") {
     drawChart();
+  }
+  if (name === "camera") {
     camUpdateViewGeometry();
   }
 }
@@ -577,7 +586,7 @@ function applyFrame(f) {
     if (activeTab === "monitor") drawChart();
   }
   if (f.sys && f.sys.cam) camUpdate(f.sys.cam);
-  if (activeTab === "monitor") drawCamOverlay();
+  if (activeTab === "camera") drawCamOverlay();
 }
 
 function renderWheels(wheels) {
@@ -595,11 +604,12 @@ function renderWheels(wheels) {
     cfg.sim_rpm && cfg.sim_rpm.forEach((v, i) => echoNum($("sim" + i), v));
   }
   wheels.wheels.forEach((w, i) => {
-    $("rpm" + i).innerHTML = fmt(w.rps, 2) + " <small>转/秒</small>";
-    $("rpmraw" + i).textContent = fmt(w.rpm, 0) + " RPM";
+    $("rpm" + i).innerHTML = fmt(w.rpm, 0) + " <small>RPM</small>";
+    $("rps" + i).textContent = fmt(w.rps, 2);
     $("spd" + i).textContent = fmt(w.speed_cms, 0) + " cm/s";
     $("freq" + i).textContent = fmt(w.freq, 3) + " Hz";
     $("pulses" + i).textContent = w.pulses ?? 0;
+    $("suspect" + i).textContent = w.suspect ?? 0;
     $("trig" + i).className = "trigger" + (w.trigger ? " on" : "");
     $("en-note" + i).textContent = w.en ? "" : "(禁用)";
   });
@@ -832,7 +842,7 @@ function camSetHint(text) {
 }
 
 function camStartStream(force) {
-  if (camStatic || activeTab !== "monitor" || document.hidden) return;
+  if (camStatic || activeTab !== "camera" || document.hidden) return;
   const img = $("cam-view");
   if (!force && img.getAttribute("src")) return;
   camStreaming = true;
@@ -848,12 +858,12 @@ function camStopStream() {
   camStreaming = false;
 }
 
-/* 切回监测 tab 时决定是复用原流还是重新请求。服务端说 streaming=true
+/* 切回图传 tab 时决定是复用原流还是重新请求。服务端说 streaming=true
  * 就绝不动 src，否则第二个流请求会拿 503 把原画面顶掉。 */
 function camSyncView() {
   if (otaInProgress) return;
   if (camStatic) { camPollStart(); return; }
-  if (activeTab !== "monitor" || document.hidden) return;
+  if (activeTab !== "camera" || document.hidden) return;
   if (lastCam && lastCam.state === "off") { camSetHint("相机已关闭"); return; }
   const img = $("cam-view");
   if (lastCam && lastCam.streaming && img.getAttribute("src")) return;
@@ -863,7 +873,7 @@ function camSyncView() {
 
 function camWatchdog() {
   if (otaInProgress) return;
-  if (camStatic || activeTab !== "monitor" || document.hidden || !lastCam) return;
+  if (camStatic || activeTab !== "camera" || document.hidden || !lastCam) return;
   if (lastCam.streaming) return;
   if (lastCam.state === "off") { camSetHint("相机已关闭"); return; }
   if (lastCam.state === "init") { camSetHint("相机启动中…"); return; }
@@ -943,7 +953,7 @@ function camUpdate(cam) {
   else if (!cam.streaming && !camStatic) camSetHint("按需待机：打开预览后启动");
   else camSetHint(null);
 
-  if (activeTab === "monitor" && !document.hidden && !camStatic) camWatchdog();
+  if (activeTab === "camera" && !document.hidden && !camStatic) camWatchdog();
 }
 
 function camMask(ids) {
@@ -1006,7 +1016,7 @@ async function camDownloadSnapshot() {
 }
 
 function camPollStart() {
-  if (!camStatic || activeTab !== "monitor" || document.hidden || camPollTimer) return;
+  if (!camStatic || activeTab !== "camera" || document.hidden || camPollTimer) return;
   camPollSnapshot();
 }
 
@@ -1016,7 +1026,7 @@ function camPollStop() {
 
 async function camPollSnapshot() {
   camPollTimer = null;
-  if (!camStatic || activeTab !== "monitor" || document.hidden) return;
+  if (!camStatic || activeTab !== "camera" || document.hidden) return;
   try {
     const r = await fetch("/cam/snapshot?t=" + Date.now(), { cache: "no-store" });
     if (r.ok) {
@@ -1036,7 +1046,7 @@ async function camPollSnapshot() {
   } catch (_) {
     camSetHint("快照请求失败");
   }
-  if (camStatic && activeTab === "monitor" && !document.hidden) {
+  if (camStatic && activeTab === "camera" && !document.hidden) {
     /* 失败/关闭时不要 1Hz 追着重试；正常轮询 1Hz 就能喂住 30 秒宽限。 */
     const delay = (lastCam && (lastCam.state === "fail" || lastCam.state === "off")) ? 5000 : 1000;
     camPollTimer = setTimeout(camPollSnapshot, delay);
@@ -1088,7 +1098,7 @@ function drawCamOverlay() {
   const W = cv.width / dpr, H = cv.height / dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-  if (!lastFrame || activeTab !== "monitor") return;
+  if (!lastFrame || activeTab !== "camera") return;
 
   const f = lastFrame;
   const mask = (lastCam && lastCam.overlay !== undefined) ? lastCam.overlay : 15;
@@ -1228,7 +1238,7 @@ function connectWS() {
     $("status-text").textContent = otaInProgress ? "设备重启中，等待重新连接…" : "已连接";
     reconnect = 0;
     /* 断线重连后按当前 tab 补发预览状态，避免服务端还停在不可见计时里。 */
-    camSendPreview(activeTab === "monitor" && !document.hidden);
+    camSendPreview(activeTab === "camera" && !document.hidden);
   };
   ws.onmessage = e => { try { lastFrame = JSON.parse(e.data); applyFrame(lastFrame); } catch (_) {} };
   ws.onclose = () => { $("status-dot").className = "warn"; $("status-text").textContent = otaInProgress ? "设备重启中，等待重新连接…" : "断开，重连中…"; setTimeout(connectWS, Math.min(1000 * ++reconnect, 5000)); };
@@ -1584,11 +1594,11 @@ window.addEventListener("DOMContentLoaded", () => {
 
   $("cam-view").addEventListener("load", camUpdateViewGeometry);
   $("cam-view").addEventListener("error", () => {
-    if (camStatic || activeTab !== "monitor" || document.hidden) return;
+    if (camStatic || activeTab !== "camera" || document.hidden) return;
     if (camErrorTimer) return;
     camErrorTimer = setTimeout(() => {
       camErrorTimer = null;
-      if (camStatic || activeTab !== "monitor" || document.hidden) return;
+      if (camStatic || activeTab !== "camera" || document.hidden) return;
       if (!lastCam || lastCam.streaming) return;
       /* 启动中和初始化失败都交给 camWatchdog 按自己的节奏处理：这里重设 src
        * 会 abort 掉正在等 init 的流请求，第二个请求只会拿到 503 busy。 */
@@ -1599,12 +1609,12 @@ window.addEventListener("DOMContentLoaded", () => {
 
   document.addEventListener("visibilitychange", () => {
     const visible = !document.hidden;
-    camSendPreview(visible && activeTab === "monitor");
+    camSendPreview(visible && activeTab === "camera");
     if (!visible) {
       camPollStop();
       return;
     }
-    if (activeTab === "monitor") {
+    if (activeTab === "camera") {
       camUpdateViewGeometry();
       if (camStatic) camPollStart();
       else camSyncView();
