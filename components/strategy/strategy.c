@@ -7,6 +7,7 @@
 typedef struct {
     strategy_phase_t phase;
     uint32_t phase_since_ms; /* 进入当前阶段的时刻 */
+    uint32_t slip_since_ms;  /* 打滑确认计时起点；0=当前不在确认中 */
     uint32_t hold_ms;        /* 本次锁定的保持时长（试探失败逐次翻倍） */
     uint32_t probe_since_ms; /* 试探窗口的计时起点（动/停翻转时重置） */
     bool probe_moving;       /* 计时起点对应的轮子状态：在动 / 停着 */
@@ -34,6 +35,7 @@ void strategy_config_default(strategy_config_t *cfg)
     }
     cfg->slip_engage_ratio = 0.30f;
     cfg->slip_min_rpm = 10.0f;
+    cfg->slip_confirm_ms = 3000;
     cfg->lock_hold_ms = 3000;
     cfg->lock_hold_max_ms = 30000;
     cfg->probe_window_ms = 2000;
@@ -77,6 +79,7 @@ esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
         if (!cfg->ch_enabled[axle]) {
             a->phase = STRATEGY_PHASE_IDLE;
             a->hold_ms = 0;
+            a->slip_since_ms = 0;
             a->phase_since_ms = now_ms;
             a->target_us = (uint16_t)cfg->unlock_us[axle];
             continue;
@@ -87,6 +90,7 @@ esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
         if (cfg->mode == STRATEGY_MODE_MANUAL) {
             a->phase = STRATEGY_PHASE_IDLE;
             a->hold_ms = 0;
+            a->slip_since_ms = 0;
             a->phase_since_ms = now_ms;
             a->target_us = (uint16_t)cfg->manual_us[axle];
             continue;
@@ -95,9 +99,20 @@ esp_err_t strategy_feed_wheel_rpm(const float rpm[STRATEGY_WHEEL_COUNT],
         switch (a->phase) {
         case STRATEGY_PHASE_IDLE:
             if (slip) {
-                a->phase = STRATEGY_PHASE_LOCKED;
-                a->phase_since_ms = now_ms;
-                a->hold_ms = cfg->lock_hold_ms;
+                /* 单拍速差可能只是过坎/采样毛刺：连续满足整段确认期才上锁，
+                 * 避免瞬间打滑就机械锁一次。确认期间输出仍是解锁档。 */
+                if (a->slip_since_ms == 0) {
+                    a->slip_since_ms = now_ms;
+                }
+                if (now_ms - a->slip_since_ms >= cfg->slip_confirm_ms) {
+                    a->phase = STRATEGY_PHASE_LOCKED;
+                    a->phase_since_ms = now_ms;
+                    a->hold_ms = cfg->lock_hold_ms;
+                    a->slip_since_ms = 0;
+                }
+            } else {
+                /* 速差回落或轮子停下：确认必须从头再来 */
+                a->slip_since_ms = 0;
             }
             break;
 

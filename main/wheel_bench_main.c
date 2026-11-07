@@ -195,6 +195,7 @@ static void strat_cfg_build(const cfg_params_t *cfg, strategy_config_t *out)
                                                            : STRATEGY_MODE_AUTO;
     out->slip_engage_ratio = cfg->slip_engage_ratio;
     out->slip_min_rpm = cfg->slip_min_rpm;
+    out->slip_confirm_ms = cfg->slip_confirm_ms;
     out->lock_hold_ms = cfg->lock_hold_ms;
     out->lock_hold_max_ms = cfg->lock_hold_max_ms;
     out->probe_window_ms = cfg->probe_window_ms;
@@ -536,13 +537,14 @@ void app_main(void)
     /* 舵机配置值得单独打一行：升级后这里能直接看出新字段是否落到了预期值
      * （v1 blob 迁移后新字段取默认，一眼可辨） */
     ESP_LOGI(TAG, "servo: sim=%d mode=%lu en=[%d,%d] 解锁/锁定=[%lu/%lu,%lu/%lu] "
-                  "手动=[%lu,%lu] engage=%.2f minrpm=%.1f hold=%lu/%lu probe=%lu speed=%lu",
+                  "手动=[%lu,%lu] engage=%.2f minrpm=%.1f confirm=%lu hold=%lu/%lu probe=%lu speed=%lu",
              cfg.servo_sim, (unsigned long)cfg.servo_mode,
              cfg.servo_en[0], cfg.servo_en[1],
              (unsigned long)cfg.servo_unlock_us[0], (unsigned long)cfg.servo_lock_us[0],
              (unsigned long)cfg.servo_unlock_us[1], (unsigned long)cfg.servo_lock_us[1],
              (unsigned long)cfg.servo_manual_us[0], (unsigned long)cfg.servo_manual_us[1],
              (double)cfg.slip_engage_ratio, (double)cfg.slip_min_rpm,
+             (unsigned long)cfg.slip_confirm_ms,
              (unsigned long)cfg.lock_hold_ms, (unsigned long)cfg.lock_hold_max_ms,
              (unsigned long)cfg.probe_window_ms,
              (unsigned long)cfg.servo_sim_speed_us_s);

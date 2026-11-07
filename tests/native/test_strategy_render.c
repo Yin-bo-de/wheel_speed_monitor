@@ -67,6 +67,7 @@ static void test_all_required_fields(void)
     assert_contains(buf, "\"manual_us\":[");
     assert_contains(buf, "\"engage\":0.30");
     assert_contains(buf, "\"min_rpm\":10.0");
+    assert_contains(buf, "\"confirm_ms\":3000");
     assert_contains(buf, "\"hold_ms\":3000");
     assert_contains(buf, "\"hold_max_ms\":30000");
     assert_contains(buf, "\"probe_ms\":2000");

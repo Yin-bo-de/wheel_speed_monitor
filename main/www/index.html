@@ -276,7 +276,9 @@
     <div class="cfg-grid">
       <div><label>进入门槛(0.05~1.0)</label><input id="sengage" type="number" min="0.05" max="1" step="0.05" value="0.3"></div>
       <div><label>最低判定(转/分)</label><input id="sminrpm" type="number" min="0" max="2000" value="10"></div>
+      <div><label>确认期(ms，0=立即锁)</label><input id="sconfirm" type="number" min="0" max="60000" value="3000"></div>
     </div>
+    <p class="hint">打滑需连续满足确认期才上锁；期间任何一拍速差回落或轮子停下都会重新计时。</p>
 
     <h2 style="margin-top:14px">锁定策略 <span class="note">(保持 → 试探 → 失败退避)</span></h2>
     <div class="cfg-grid">
@@ -684,6 +686,7 @@ function echoServoCfg(sv, cfg) {
   radios.forEach(r => { if (document.activeElement !== r) r.checked = (r.value === cfg.mode); });
   echoNum($("sengage"), cfg.engage);
   echoNum($("sminrpm"), cfg.min_rpm);
+  echoNum($("sconfirm"), cfg.confirm_ms);
   echoNum($("shold"), cfg.hold_ms);
   echoNum($("sholdmax"), cfg.hold_max_ms);
   echoNum($("sprobe"), cfg.probe_ms);
@@ -1523,6 +1526,7 @@ function applyServoCfg() {
     servo_manual_us: [0, 1].map(i => parseInt($("man" + i).value, 10)),
     slip_engage_ratio: parseFloat($("sengage").value),
     slip_min_rpm: parseFloat($("sminrpm").value),
+    slip_confirm_ms: parseInt($("sconfirm").value, 10),
     lock_hold_ms: parseInt($("shold").value, 10),
     lock_hold_max_ms: parseInt($("sholdmax").value, 10),
     probe_window_ms: parseInt($("sprobe").value, 10),

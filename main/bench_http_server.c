@@ -328,6 +328,7 @@ static esp_err_t handle_set_cfg(const char *payload)
 
     TRY_F32("slip_engage_ratio", slip_engage_ratio);
     TRY_F32("slip_min_rpm", slip_min_rpm);
+    TRY_U32("slip_confirm_ms", slip_confirm_ms);
     TRY_U32("lock_hold_ms", lock_hold_ms);
     TRY_U32("lock_hold_max_ms", lock_hold_max_ms);
     TRY_U32("probe_window_ms", probe_window_ms);
