@@ -37,6 +37,11 @@ static const char *TAG = "camera_drv";
 
 #define CAM_XCLK_HZ 20000000
 
+/* 实验开关：hx 的 S3 PLL 参数能把 VGA 从 11fps 提到约 15fps，但当前
+ * HTS/VTS 时序和 PSRAM 帧缓冲下会出现 NO-EOI、画面中断。等分辨率时序、
+ * anti-banding 和 DRAM 帧缓冲一起移植验证通过后再打开。 */
+#define CAM_OV5640_S3_PLL_FIX 0
+
 /* S3 的 XCLK 由 LCD_CAM 产生，esp_camera_deinit() 只停采集和 DMA，
  * 不会关时钟源。模组 PWDN 固定为 -1，若时钟继续输出，停采后传感器
  * 仍会持续成像/压缩并发热。这里显式关闭时钟源并把引脚拉低。 */
@@ -235,8 +240,8 @@ esp_err_t camera_drv_init(const camera_drv_cfg_t *cfg)
 
     /* S3 + 20MHz XCLK 下上游 PLL 参数会让 OV5640 只剩 11fps。
      * 这套参数按 VGA/SVGA 的 HTS/VTS 标定，QVGA 继续走原配置。 */
-    if (sensor->id.PID == OV5640_PID && sensor->xclk_freq_hz == 20000000 &&
-        cfg->res >= CAMERA_DRV_RES_VGA) {
+    if (CAM_OV5640_S3_PLL_FIX && sensor->id.PID == OV5640_PID &&
+        sensor->xclk_freq_hz == 20000000 && cfg->res >= CAMERA_DRV_RES_VGA) {
         (void)ov5640_apply_s3_pll(sensor);
     }
     if (sensor->get_reg != NULL && sensor->set_reg != NULL) {
