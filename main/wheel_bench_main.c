@@ -35,6 +35,7 @@
 
 #include "bench_cam.h"
 #include "bench_http_server.h"
+#include "bench_ota.h"
 #include "config_store.h"
 #include "rc_capture.h"
 #include "rc_input.h"
@@ -194,6 +195,7 @@ static void strat_cfg_build(const cfg_params_t *cfg, strategy_config_t *out)
                                                            : STRATEGY_MODE_AUTO;
     out->slip_engage_ratio = cfg->slip_engage_ratio;
     out->slip_min_rpm = cfg->slip_min_rpm;
+    out->slip_confirm_ms = cfg->slip_confirm_ms;
     out->lock_hold_ms = cfg->lock_hold_ms;
     out->lock_hold_max_ms = cfg->lock_hold_max_ms;
     out->probe_window_ms = cfg->probe_window_ms;
@@ -442,6 +444,11 @@ static void ws_push_task(void *arg)
         vTaskDelayUntil(&last, pdMS_TO_TICKS(WHEEL_WS_PUSH_MS));
         uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
+        /* 升级期间 httpd 被上传占住，异步广播会在队列里堆积。 */
+        if (bench_ota_busy()) {
+            continue;
+        }
+
         /* 组装各轮显示快照：全部写 s_units[0].disp（渲染端固定读它，
          * 此前误写各 unit 自己的 wheels[i]，导致只有 wheels[0] 有值、
          * wheels[1..3] 全零→页面显示禁用/0 RPM） */
@@ -465,6 +472,7 @@ static void ws_push_task(void *arg)
             w->speed_km_h = u->chan.math.speed_km_h;
             w->freq_hz = u->chan.math.freq_hz;
             w->pulses = u->chan.pulses_total;
+            w->suspect = u->chan.suspect_count;
             w->trigger = u->chan.trigger;
         }
 
@@ -529,13 +537,14 @@ void app_main(void)
     /* 舵机配置值得单独打一行：升级后这里能直接看出新字段是否落到了预期值
      * （v1 blob 迁移后新字段取默认，一眼可辨） */
     ESP_LOGI(TAG, "servo: sim=%d mode=%lu en=[%d,%d] 解锁/锁定=[%lu/%lu,%lu/%lu] "
-                  "手动=[%lu,%lu] engage=%.2f minrpm=%.1f hold=%lu/%lu probe=%lu speed=%lu",
+                  "手动=[%lu,%lu] engage=%.2f minrpm=%.1f confirm=%lu hold=%lu/%lu probe=%lu speed=%lu",
              cfg.servo_sim, (unsigned long)cfg.servo_mode,
              cfg.servo_en[0], cfg.servo_en[1],
              (unsigned long)cfg.servo_unlock_us[0], (unsigned long)cfg.servo_lock_us[0],
              (unsigned long)cfg.servo_unlock_us[1], (unsigned long)cfg.servo_lock_us[1],
              (unsigned long)cfg.servo_manual_us[0], (unsigned long)cfg.servo_manual_us[1],
              (double)cfg.slip_engage_ratio, (double)cfg.slip_min_rpm,
+             (unsigned long)cfg.slip_confirm_ms,
              (unsigned long)cfg.lock_hold_ms, (unsigned long)cfg.lock_hold_max_ms,
              (unsigned long)cfg.probe_window_ms,
              (unsigned long)cfg.servo_sim_speed_us_s);
@@ -591,6 +600,9 @@ void app_main(void)
         .units = s_units,
     };
     ESP_ERROR_CHECK(bench_http_server_start(&ctx));
+
+    /* WiFi 与 httpd 都起来了才算这次启动可用，否则让 bootloader 回滚。 */
+    bench_ota_mark_valid();
 
     /* httpd 与 mutex 就绪后再起推送任务，避免 xSemaphoreTake(NULL) */
     xTaskCreatePinnedToCore(sampler_task, "sampler", WHEEL_SAMPLER_STACK, NULL,

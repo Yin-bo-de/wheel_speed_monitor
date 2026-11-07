@@ -71,7 +71,17 @@ ctest --test-dir tests/native/build --output-on-failure
   `docs/CAMERA_DESIGN.md` 4.5.1，改之前先读。相机不是采集器：像素走自己的
   HTTP 端点，只有状态和配置回显进 `telemetry` 的 `sys.cam`。
 - **相机帧率在采集侧控制**：`camera_drv` 按实测基准改 OV2640 的 CLKRC / OV5640
-  的 VTS；网络自适应由纯 C 的 `cam_rate` 计算有效帧率，修改也要给它补宿主机测试。
+  的 VTS（OV5640 在 S3 上还要接管 PLL 并重算 anti-banding）；网络自适应由纯 C
+  的 `cam_rate` 计算有效帧率和自适应 JPEG 画质，修改也要给它补宿主机测试。
+- **OTA 写 flash 会停 cache**：升级在 httpd 任务里同步跑，不新增任务。写入前
+  必须 `bench_cam_suspend_for_ota()` 停相机和 MJPEG，并让 `ws_push_task` 通过
+  `bench_ota_busy()` 跳过广播；采样和舵机不停（PCNT/LEDC 是硬件计数，短暂停
+  cache 不丢状态）。新固件启动后 `app_main` 在 httpd 就绪时调用
+  `bench_ota_mark_valid()`，没确认就崩溃会被 bootloader 回滚。分区表变更、
+  版本号维护和首次 USB 烧录见 README「无线固件升级」。
+- **httpd URI 槽位**：`HTTPD_DEFAULT_CONFIG()` 默认 `max_uri_handlers=8`，
+  现在页面 4 + 相机 2 + OTA 3 共 9 个，已显式扩到 12。新增端点时先核对这个数，
+  注册失败会让 `bench_http_server_start` 返回错误、设备启动即 abort。
 - 队列/锁都在 main/ 静态共享（bench_http_server 经 ctx 引用）：
   - `s_cfg_mutex`（配置）、`s_frame_mutex`（最新帧）、`s_clients_mutex`（WS 客户端表）
   - 共享结构见 `main/wheel_bench.h`（bench_server_ctx_t）
@@ -113,9 +123,10 @@ main（编排/任务/WiFi/httpd）
  ├─ rc_capture       GPIO 双沿中断测遥控脉宽（IDF 依赖）
  │                   └─ 与验证台模拟注入共用同一个 rc_input 模型，按配置二选一
  ├─ camera_drv       板载 DVP 相机的 esp32-camera 薄封装 + 传感器帧率（IDF 依赖）
- ├─ cam_rate         网络自适应帧率控制器（纯 C，宿主机可测）
- └─ bench_cam        相机生命周期 / 发布缓冲 / cam_publish_task（IDF 依赖）
-    └─ bench_cam_stream  /cam/stream 异步 MJPEG 与 /cam/snapshot（IDF 依赖）
+ ├─ cam_rate         网络自适应帧率与画质控制器（纯 C，宿主机可测）
+ ├─ bench_cam        相机生命周期 / 发布缓冲 / cam_publish_task（IDF 依赖）
+ │  └─ bench_cam_stream  /cam/stream 异步 MJPEG 与 /cam/snapshot（IDF 依赖）
+ └─ bench_ota        OTA 上传 / 校验 / 回退端点（IDF 依赖，跑在 httpd 任务里）
 ```
 
 新增采集器步骤见 README「扩展」。

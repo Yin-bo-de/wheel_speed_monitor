@@ -44,8 +44,10 @@ typedef struct {
     uint8_t clients;        /* 流客户端数（单流限制下只可能是 0/1） */
     uint32_t stop_in_s;     /* 距离停采集还剩几秒，0 = 没有计时 */
     const char *res;        /* qvga / vga / svga */
-    uint8_t quality;        /* JPEG quality 4..63 */
-    uint8_t fps_cap;        /* 用户配置的采集/发送帧率上限 */
+    uint8_t quality;        /* 用户配置的 JPEG quality 4..63 */
+    uint8_t quality_eff;    /* 驱动确认写入传感器的 quality，可能高于配置值 */
+    uint8_t fps_cap;        /* 实际使用的上限：min(用户配置, 实测基准) */
+    uint8_t fps_user_cap;   /* 用户配置的采集/发送帧率上限 */
     uint8_t fps_eff;        /* 网络自适应后的当前有效帧率 */
     uint32_t overlay_mask;  /* 叠加位图 */
     float fps;              /* 实测发布帧率 */

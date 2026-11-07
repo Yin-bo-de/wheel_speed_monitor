@@ -12,6 +12,7 @@
 #include "bench_cam.h"
 #include "bench_cam_stream.h"
 #include "bench_http_server.h"
+#include "bench_ota.h"
 #include "config_store.h"
 #include "wheel_config.h"
 
@@ -327,6 +328,7 @@ static esp_err_t handle_set_cfg(const char *payload)
 
     TRY_F32("slip_engage_ratio", slip_engage_ratio);
     TRY_F32("slip_min_rpm", slip_min_rpm);
+    TRY_U32("slip_confirm_ms", slip_confirm_ms);
     TRY_U32("lock_hold_ms", lock_hold_ms);
     TRY_U32("lock_hold_max_ms", lock_hold_max_ms);
     TRY_U32("probe_window_ms", probe_window_ms);
@@ -545,6 +547,8 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = WHEEL_HTTPD_STACK;
     cfg.core_id = WHEEL_HTTPD_CORE;
+    /* 默认只有 8 个 URI 槽位：页面 4 + 相机 2 + OTA 3 = 9，不扩会注册失败。 */
+    cfg.max_uri_handlers = 12;
     /* 4 个 WS + 1 个 MJPEG + 页面/快照/临时连接；默认 7 在满员时会把
      * 新连接挤掉，lwIP 侧已经给了 16 个 socket。 */
     cfg.max_open_sockets = 10;
@@ -581,6 +585,9 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
 
     /* /cam/stream 与 /cam/snapshot 在这里注册；流发送任务也一并起来。 */
     ESP_RETURN_ON_ERROR(bench_cam_stream_start(hd), TAG, "camera endpoints");
+
+    /* OTA 端点：上传在 httpd 任务里同步执行，不新增任务。 */
+    ESP_RETURN_ON_ERROR(bench_ota_start(hd), TAG, "ota endpoints");
 
     ESP_LOGI(TAG, "httpd up; page http://%s/", WHEEL_AP_IP);
     return ESP_OK;

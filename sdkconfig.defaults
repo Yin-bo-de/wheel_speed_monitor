@@ -1,6 +1,11 @@
 # ---- wheel_speed_monitor v1 固化配置 ----
-# 分区：v1 无 OTA/SPIFFS，用默认单 app 分区，显式固化防止误选
-CONFIG_PARTITION_TABLE_SINGLE_APP=y
+# 双 OTA 分区：新固件写入另一块，启动失败可回滚。
+# 16MB Flash 切成两块 4MB app，剩余 7.9MB 预留给日志/网页资源。
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# 新固件首次启动必须在 httpd 起来后 mark valid，否则 bootloader 回滚。
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # Freenove FNK0085 板载 16MB Flash；仅影响 esptool 校验，v1 固件 <1MB
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -36,3 +41,7 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # esp32-camera 的 DMA 任务默认钉 Core0、优先级 23，会抢 sampler_task（22）。
 # 挪到 Core1，和 httpd/流任务同核，Core0 的 50ms 控制节拍不受影响。
 CONFIG_CAMERA_CORE1=y
+
+# 注：CONFIG_CAMERA_PSRAM_DMA 实测不能用（见 camera_drv.c 的 PLL 注释）：
+# DMA 直写 PSRAM 帧缓冲后取帧要走 cache 同步，PCLK 20MHz 时几乎每帧
+# NO-EOI、grab 掉到 1fps，比乒乓拷贝模式差得多。保持关闭。

@@ -1,10 +1,11 @@
 /*
  * cam_rate：相机网络自适应帧率控制器（纯 C，无 IDF 依赖）。
  *
- * 输入只有"一帧发出去花了多久"；输出是当前有效采集/发送帧率。发送阻塞
- * 说明 TCP 缓冲被下游顶住，按 3/4 退让；连续快速发送一段时间后每 3 秒加
- * 1fps，逐步回到用户配置上限。控制器不直接碰传感器，应用层把 effective
- * 交给 camera_drv 改 CLKRC/VTS。
+ * 输入是每帧发送耗时，按 1 秒窗口取平均后再判断，单帧长尾不再触发降速。
+ * 流启动后前 5 秒只观察不降速，给 AEC/AGC 收敛和 TCP 建窗留时间。
+ * 窗口平均阻塞说明 TCP 缓冲被下游顶住，按 3/4 退让；连续多个快窗口后
+ * 每 3 秒加 1fps，逐步回到用户配置上限。控制器不直接碰传感器，应用层把
+ * effective 交给 camera_drv 改 CLKRC/VTS。
  */
 #ifndef CAM_RATE_H
 #define CAM_RATE_H
@@ -19,19 +20,38 @@ extern "C" {
 
 #define CAM_RATE_FPS_MIN 5
 #define CAM_RATE_FPS_MAX 25
+/* JPEG quality 的配置范围，与 cfg_params 保持一致（bench_cam 里有静态断言）。 */
+#define CAM_QUALITY_MIN 4
+#define CAM_QUALITY_MAX 63
+/* 自适应画质：帧率已到下限仍拥堵时，每次加 2，最多比用户值高 12；
+ * 网络完全恢复后每两个评估窗口（10 秒）还 2 档。 */
+#define CAM_QUALITY_STEP 2
+#define CAM_QUALITY_MAX_DELTA 12
+#define CAM_QUALITY_RECOVER_WINDOWS 2
 /* 慢发送阈值随有效帧率变化：约 1.5 个帧间隔，最低 100ms、最高 400ms。 */
 #define CAM_RATE_SLOW_MIN_MS 100
 #define CAM_RATE_SLOW_MAX_MS 400
 #define CAM_RATE_FAST_MS 60
 #define CAM_RATE_SLOW_COOLDOWN_MS 2000
 #define CAM_RATE_RECOVER_MS 3000
-#define CAM_RATE_FAST_STREAK 30
+/* 流启动后先看 5 秒：相机曝光收敛、浏览器建 TCP 窗口都在这一段。 */
+#define CAM_RATE_STARTUP_MS 5000
+/* 发送耗时按 1 秒窗口结算，窗口内的单帧长尾被平均掉。 */
+#define CAM_RATE_WINDOW_MS 1000
+/* 连续多少个快窗口才允许恢复 1fps。 */
+#define CAM_RATE_FAST_WINDOWS 3
 
 typedef struct {
     uint32_t cap;            /* 用户配置上限 */
     uint32_t effective;      /* 当前生效帧率 */
     uint32_t last_change_ms; /* 上次调整时刻 */
-    uint32_t fast_streak;    /* 连续快速发送计数 */
+    uint32_t fast_streak;    /* 连续快速窗口计数 */
+    uint32_t stream_start_ms;/* 本次流开始时刻 */
+    uint32_t win_start_ms;   /* 当前统计窗口起点 */
+    uint32_t win_sum_ms;     /* 窗口内发送耗时总和 */
+    uint32_t win_frames;     /* 窗口内帧数 */
+    uint32_t last_avg_ms;    /* 最近一个结算窗口的平均发送耗时 */
+    bool last_avg_valid;     /* last_avg_ms 是否来自已结算窗口；0ms 是有效样本 */
     bool stream_active;
 } cam_rate_t;
 
@@ -52,8 +72,34 @@ void cam_rate_stream_stop(cam_rate_t *r, uint32_t now_ms);
 /* 上报一帧的发送耗时（含 TCP 阻塞），返回调整后的 effective。 */
 uint32_t cam_rate_report_send(cam_rate_t *r, uint32_t send_ms, uint32_t now_ms);
 
+/* 只清空当前 1 秒统计窗口，不动 effective 和冷却状态。相机临时恢复默认
+ * 时序重测基准帧率时，用来丢弃那段异常样本。 */
+void cam_rate_reset_window(cam_rate_t *r);
+
 uint32_t cam_rate_effective(const cam_rate_t *r);
 uint32_t cam_rate_cap(const cam_rate_t *r);
+bool cam_rate_avg_valid(const cam_rate_t *r);
+
+/* 自适应 JPEG 画质。帧率已经压到下限、一个帧间隔仍发不完，说明是帧体积
+ * 顶住了链路；这时提高 quality 数值（压缩更强、帧更小），继续降帧率只会
+ * 更卡。网络完全恢复后逐档回到用户配置值。 */
+typedef struct {
+    uint8_t user;         /* 用户配置值 */
+    uint8_t effective;    /* 目标值，评估后立即变化 */
+    uint8_t applied;      /* 驱动确认写进传感器的值 */
+    uint8_t fast_windows; /* 连续快速窗口计数 */
+} cam_quality_t;
+
+void cam_quality_init(cam_quality_t *q, uint8_t user_quality);
+
+/* 每 5 秒评估一次。avg_valid 区分"已结算窗口平均 0ms"和"还没有样本"。
+ * 返回 true 表示 effective 变了，调用方需要写传感器。 */
+bool cam_quality_evaluate(cam_quality_t *q, bool stream_active, bool avg_valid,
+                          uint32_t fps_eff, uint32_t fps_cap,
+                          uint32_t avg_send_ms);
+
+/* 流结束：直接恢复用户配置。返回 true 表示需要写传感器。 */
+bool cam_quality_restore(cam_quality_t *q);
 
 #ifdef __cplusplus
 }

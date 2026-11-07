@@ -1,9 +1,10 @@
 /*
- * strategy 引擎测试：两档脉宽映射（每通道独立）、打滑状态机（锁定保持 /
- * 松开试探 / 失败退避）、模式与使能、参数守卫。
+ * strategy 引擎测试：两档脉宽映射（每通道独立）、打滑状态机（进入确认 /
+ * 锁定保持 / 松开试探 / 失败退避）、模式与使能、参数守卫。
  *
  * 状态机的核心主张——"锁定期间不看轮速差"——由 test_locked_ignores_ratio
  * 直接守住：锁上后把轮速差抹平，锁定必须继续，否则就是自咬闭环。
+ * 进入 LOCKED 前的持续确认见 test_slip_confirm_*：单拍打滑是毛刺，不是地形。
  */
 #include <string.h>
 
@@ -52,6 +53,7 @@ static void test_config_defaults(void)
     TEST_ASSERT_EQUAL_INT(STRATEGY_MODE_AUTO, cfg.mode);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.30f, cfg.slip_engage_ratio);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 10.0f, cfg.slip_min_rpm);
+    TEST_ASSERT_EQUAL_UINT32(3000, cfg.slip_confirm_ms);
     TEST_ASSERT_EQUAL_UINT32(3000, cfg.lock_hold_ms);
     TEST_ASSERT_EQUAL_UINT32(30000, cfg.lock_hold_max_ms);
     TEST_ASSERT_EQUAL_UINT32(2000, cfg.probe_window_ms);
@@ -76,7 +78,7 @@ static void test_lock_us_per_channel(void)
     cfg.lock_us[0] = 2000;
     cfg.lock_us[1] = 1000; /* 后轴装反：锁定去行程另一端 */
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 200, 60); /* 前后轴同时打滑 */
+    run(&t, 3050, 200, 60, 200, 60); /* 前后轴同时打滑并走满确认期 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[1].phase);
@@ -97,7 +99,7 @@ static void test_auto_output_is_two_detent_only(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT16(1300, st.servo[0].target_us);
 
-    run(&t, 50, 200, 60, 60, 60); /* 打滑 → 锁定档 */
+    run(&t, 3050, 200, 60, 60, 60); /* 打滑满确认期 → 锁定档 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT16(1750, st.servo[0].target_us);
 
@@ -112,7 +114,7 @@ static void test_slip_locks_that_axle_only(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60); /* 前轴比例 |200-60|/200 = 0.70 > 0.30 */
+    run(&t, 3050, 200, 60, 60, 60); /* 前轴比例 |200-60|/200 = 0.70，走满确认期 */
 
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
@@ -128,7 +130,7 @@ static void test_locked_ignores_ratio(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);      /* 锁上，保持 3000ms */
+    run(&t, 3050, 200, 60, 60, 60);    /* 走满确认期锁上，保持 3000ms */
     run(&t, 2000, 60, 60, 60, 60);     /* 差速锁住 → 两轮同步 → 比例归零 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
@@ -140,7 +142,7 @@ static void test_hold_expires_into_probe(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);
+    run(&t, 3050, 200, 60, 60, 60);
     run(&t, 3050, 60, 60, 60, 60); /* 累计越过 3000ms 保持期 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PROBE, st.servo[0].phase);
@@ -152,7 +154,7 @@ static void test_probe_relock_doubles_hold(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);
+    run(&t, 3050, 200, 60, 60, 60);
     run(&t, 3050, 60, 60, 60, 60);
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PROBE, st.servo[0].phase);
@@ -174,7 +176,7 @@ static void test_hold_doubling_caps(void)
     strategy_init();
 
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);       /* 锁上，hold=20000 */
+    run(&t, 3050, 200, 60, 60, 60);     /* 走满确认期锁上，hold=20000 */
     run(&t, 20050, 60, 60, 60, 60);     /* → PROBE */
     run(&t, 50, 200, 60, 60, 60);       /* 回锁，翻倍被上限截住 */
     strategy_get_state(&st);
@@ -188,7 +190,7 @@ static void test_probe_window_restarts_on_state_change(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);     /* 锁上 */
+    run(&t, 3050, 200, 60, 60, 60);   /* 走满确认期锁上 */
     run(&t, 3050, 60, 60, 60, 60);    /* → PROBE，在动，开始计时 */
     run(&t, 1000, 0, 0, 0, 0);        /* 刚停下 1 秒：翻转 → 重新计时 */
     strategy_get_state(&st);
@@ -208,7 +210,7 @@ static void test_probe_success_resets_hold(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);
+    run(&t, 3050, 200, 60, 60, 60);
     run(&t, 3050, 60, 60, 60, 60);       /* → PROBE */
     run(&t, 50, 200, 60, 60, 60);        /* 回锁，hold 翻到 6000 */
     strategy_get_state(&st);
@@ -269,7 +271,7 @@ static void test_lock_equals_unlock_keeps_still(void)
     cfg.unlock_us[0] = 1600;
     cfg.lock_us[0] = 1600;
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);
+    run(&t, 3050, 200, 60, 60, 60);
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase); /* 判定照跑 */
     TEST_ASSERT_EQUAL_UINT16(1600, st.servo[0].target_us);           /* 只是不动 */
@@ -280,7 +282,7 @@ static void test_init_resets_state(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);
+    run(&t, 3050, 200, 60, 60, 60); /* 走满确认期才锁上 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
 
@@ -308,7 +310,7 @@ static void test_backoff_resets_when_slip_clears(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);   /* 锁上 3000 */
+    run(&t, 3050, 200, 60, 60, 60); /* 走满确认期锁上 3000 */
     run(&t, 3050, 200, 60, 60, 60); /* 保持走完 → PROBE → 仍打滑，回锁 6000 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
@@ -318,7 +320,7 @@ static void test_backoff_resets_when_slip_clears(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
 
-    run(&t, 50, 200, 60, 60, 60); /* 再打滑：必须从 3000 重新开始 */
+    run(&t, 3050, 200, 60, 60, 60); /* 再打滑：确认期与退避都从头开始 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
     TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
@@ -331,7 +333,7 @@ static void test_backoff_resets_when_stopped(void)
 {
     fresh();
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);
+    run(&t, 3050, 200, 60, 60, 60); /* 走满确认期锁上 */
     run(&t, 3050, 200, 60, 60, 60); /* 回锁 6000 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
@@ -341,8 +343,89 @@ static void test_backoff_resets_when_stopped(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
 
-    run(&t, 50, 200, 60, 60, 60); /* 再打滑：从 3000 重新开始 */
+    run(&t, 3050, 200, 60, 60, 60); /* 再打滑：确认期与退避都从 3000 重新开始 */
     strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
+}
+
+/* 20. 打滑出现的第一个采样点不锁定：先进入持续确认，输出仍是解锁档 */
+static void test_slip_first_tick_not_locked(void)
+{
+    fresh();
+    uint32_t t = 0;
+    run(&t, 50, 200, 60, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+    TEST_ASSERT_EQUAL_UINT32(0, st.servo[0].hold_ms);
+}
+
+/* 21. 连续打滑满确认期（默认 3000ms）才锁定：差 50ms 都还留在 IDLE。
+ * 首个打滑样本在 t=50，锁定发生在 t=3050，即"连续 60 拍之后"。 */
+static void test_slip_confirm_period_required(void)
+{
+    fresh();
+    uint32_t t = 0;
+    run(&t, 3000, 200, 60, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    run(&t, 50, 200, 60, 60, 60); /* 再走一拍，确认期满 3000ms → 锁定 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
+    TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
+}
+
+/* 22. 确认期间速差回落一拍 → 计时清零；再打滑必须重新等满确认期 */
+static void test_confirm_resets_when_slip_clears(void)
+{
+    fresh();
+    uint32_t t = 0;
+    run(&t, 2500, 200, 60, 60, 60); /* 确认到一半 */
+    run(&t, 50, 60, 60, 60, 60);    /* 速差回落一拍 → 确认作废 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+
+    run(&t, 2950, 200, 60, 60, 60); /* 重新打滑：不够 3 秒仍不锁 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+
+    run(&t, 100, 200, 60, 60, 60); /* 从新的起点满 3000ms → 锁定 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+}
+
+/* 23. 确认期间轮子静止（moving 为假）→ 计时同样清零 */
+static void test_confirm_resets_when_stopped(void)
+{
+    fresh();
+    uint32_t t = 0;
+    run(&t, 2500, 200, 60, 60, 60);
+    run(&t, 50, 0, 0, 60, 60); /* 前轴停转一拍 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+
+    run(&t, 2950, 200, 60, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+
+    run(&t, 100, 200, 60, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+}
+
+/* 24. 确认期配成 0 = 保留旧行为：打滑第一拍立即锁定 */
+static void test_confirm_zero_locks_immediately(void)
+{
+    fresh();
+    cfg.slip_confirm_ms = 0;
+    uint32_t t = 0;
+    run(&t, 50, 200, 60, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
     TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
 }
 
@@ -366,4 +449,9 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_arg_guards, "test_arg_guards", __LINE__);
     UnityDefaultTestRun(test_backoff_resets_when_slip_clears, "test_backoff_resets_when_slip_clears", __LINE__);
     UnityDefaultTestRun(test_backoff_resets_when_stopped, "test_backoff_resets_when_stopped", __LINE__);
+    UnityDefaultTestRun(test_slip_first_tick_not_locked, "test_slip_first_tick_not_locked", __LINE__);
+    UnityDefaultTestRun(test_slip_confirm_period_required, "test_slip_confirm_period_required", __LINE__);
+    UnityDefaultTestRun(test_confirm_resets_when_slip_clears, "test_confirm_resets_when_slip_clears", __LINE__);
+    UnityDefaultTestRun(test_confirm_resets_when_stopped, "test_confirm_resets_when_stopped", __LINE__);
+    UnityDefaultTestRun(test_confirm_zero_locks_immediately, "test_confirm_zero_locks_immediately", __LINE__);
 )

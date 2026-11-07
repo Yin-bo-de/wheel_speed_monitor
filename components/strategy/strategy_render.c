@@ -58,13 +58,15 @@ esp_err_t servo_render_block(const servo_render_state_t *rs,
 
     RENDER_SNPRINTF("],\"cfg\":{\"sim\":%s,\"unlock_us\":[%lu,%lu],\"lock_us\":[%lu,%lu],"
                     "\"manual_us\":[%lu,%lu],\"mode\":\"%s\","
-                    "\"engage\":%.2f,\"min_rpm\":%.1f,\"hold_ms\":%lu,\"hold_max_ms\":%lu,"
+                    "\"engage\":%.2f,\"min_rpm\":%.1f,\"confirm_ms\":%lu,"
+                    "\"hold_ms\":%lu,\"hold_max_ms\":%lu,"
                     "\"probe_ms\":%lu,\"sim_speed\":%lu}}",
                     rs->sim ? "true" : "false",
                     (unsigned long)cfg->unlock_us[0], (unsigned long)cfg->unlock_us[1],
                     (unsigned long)cfg->lock_us[0], (unsigned long)cfg->lock_us[1],
                     (unsigned long)cfg->manual_us[0], (unsigned long)cfg->manual_us[1], cfg_mode,
                     (double)cfg->slip_engage_ratio, (double)cfg->slip_min_rpm,
+                    (unsigned long)cfg->slip_confirm_ms,
                     (unsigned long)cfg->lock_hold_ms, (unsigned long)cfg->lock_hold_max_ms,
                     (unsigned long)cfg->probe_window_ms, (unsigned long)rs->sim_speed_us_s);
 

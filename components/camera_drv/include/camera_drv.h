@@ -55,6 +55,14 @@ bool camera_drv_fps_control_supported(void);
  * 只有 cam_publish_task 调用。 */
 esp_err_t camera_drv_set_fps(uint32_t base_fps, uint32_t target_fps);
 
+/* 恢复初始化时的默认帧率时序（CLKRC/VTS），用于重新测量基准帧率。
+ * 只有 cam_publish_task 调用。 */
+esp_err_t camera_drv_reset_fps(void);
+
+/* 运行中调整 JPEG 画质（4..63，值越大压缩越强）。网络自适应在帧率
+ * 已经降到下限、发送仍拥堵时用它继续减小帧体积。只有 cam_publish_task 调用。 */
+esp_err_t camera_drv_set_quality(uint32_t quality);
+
 /* 取一帧，阻塞到驱动自己的取帧超时（esp32-camera 约 4 秒）或拿到帧。
  * 成功返回 ESP_OK，out->handle 必须交给 camera_drv_release。 */
 esp_err_t camera_drv_grab(camera_drv_frame_t *out);

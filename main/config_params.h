@@ -6,7 +6,8 @@
  * blob 版本迁移：v1（32B）是一期的布局；v2（72B）在尾部追加舵机与锁定策略
  * 参数；v3（76B）把舵机脉宽从"共享的 min/center/max + invert"换成"每通道的
  * 解锁/锁定两档"；v4（84B）在尾部追加遥控输入（模拟开关与三路模拟脉宽）；
- * v5（92B）在尾部追加摄像头策略、分辨率、画质、采集/发送帧率上限与叠加位图。
+ * v5（92B）在尾部追加摄像头策略、分辨率、画质、采集/发送帧率上限与叠加位图；
+ * v6（96B）在尾部追加打滑确认期（首次判定打滑后需连续满足多久才上锁）。
  * 解包按首字节版本号分派——旧 blob 仍可解，缺失字段取默认值（v2 还要按旧
  * 语义换算，见 cfg_params_unpack），上层解出后回写最新版，升级不丢用户已设的配置。
  */
@@ -48,6 +49,8 @@ extern "C" {
 #define CFG_LOCK_HOLD_MAX_MS 60000
 #define CFG_PROBE_WINDOW_MIN_MS 200
 #define CFG_PROBE_WINDOW_MAX_MS 10000
+/* 打滑确认期上限 60s；下限 0 = 立即上锁（保留旧行为） */
+#define CFG_SLIP_CONFIRM_MAX_MS 60000
 #define CFG_SIM_SPEED_MIN 100
 #define CFG_SIM_SPEED_MAX 20000
 
@@ -83,10 +86,11 @@ extern "C" {
  *   v4 段 76..83：rc_sim(1B) + rc_sim_us(u16×3) + 保留(1B)
  *   v5 段 84..91：cam_policy(1B) + cam_res(1B) + cam_quality(1B)
  *               + cam_fps_cap(1B) + overlay_mask(u32)
+ *   v6 段 92..95：slip_confirm_ms(u32)
  * v2 段（32..71）与 v3 段是同义不同形：v2 用共享的 min/center/max + invert
  * 位图描述脉宽，v3 换成每通道两档，因此长 4 字节、其余字段偏移整体后移。 */
-#define CFG_PARAMS_BLOB_VERSION 5
-#define CFG_PARAMS_BLOB_SIZE 92
+#define CFG_PARAMS_BLOB_VERSION 6
+#define CFG_PARAMS_BLOB_SIZE 96
 #define CFG_PARAMS_BLOB_VERSION_1 1
 #define CFG_PARAMS_BLOB_SIZE_V1 32
 #define CFG_PARAMS_BLOB_VERSION_2 2
@@ -95,6 +99,8 @@ extern "C" {
 #define CFG_PARAMS_BLOB_SIZE_V3 76
 #define CFG_PARAMS_BLOB_VERSION_4 4
 #define CFG_PARAMS_BLOB_SIZE_V4 84
+#define CFG_PARAMS_BLOB_VERSION_5 5
+#define CFG_PARAMS_BLOB_SIZE_V5 92
 
 typedef struct {
     uint32_t magnets;    /* 每转磁铁数 1-16 */
@@ -136,12 +142,16 @@ typedef struct {
     uint32_t cam_quality;   /* JPEG quality 4..63，值小画质高 */
     uint32_t cam_fps_cap;   /* 采集/发送帧率上限 5..25；传感器支持时直接降采集帧率 */
     uint32_t overlay_mask;  /* CFG_CAM_OVERLAY_* 位图 */
+
+    /* ---- v6：打滑确认 ---- */
+    uint32_t slip_confirm_ms; /* 首次打滑后需连续满足多久才上锁；0=立即锁 */
 } cfg_params_t;
 
 void cfg_params_default(cfg_params_t *cfg);
 
 /* 校验单字段；字段名与 JSON 命令一致（magnets、diam、alpha、en、sim、
- * sim_rpm、debounce，以及 v2 的舵机与锁定策略各字段，见上表）。
+ * sim_rpm、debounce，以及 v2 的舵机与锁定策略各字段、v6 的 slip_confirm_ms，
+ * 见上表）。
  * 未知字段返回 ESP_OK（命令层忽略）。
  * 跨字段约束（min<center<max、hold_max>=hold）随任一相关字段被写时一并检查，
  * 前端整组提交即保持一致。 */

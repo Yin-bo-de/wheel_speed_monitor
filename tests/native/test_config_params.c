@@ -130,6 +130,7 @@ static void test_servo_defaults(void)
     TEST_ASSERT_EQUAL_INT(CFG_SERVO_MODE_AUTO, cfg.servo_mode);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.30f, cfg.slip_engage_ratio);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 10.0f, cfg.slip_min_rpm);
+    TEST_ASSERT_EQUAL_INT(3000, cfg.slip_confirm_ms);
     TEST_ASSERT_EQUAL_INT(3000, cfg.lock_hold_ms);
     TEST_ASSERT_EQUAL_INT(30000, cfg.lock_hold_max_ms);
     TEST_ASSERT_EQUAL_INT(2000, cfg.probe_window_ms);
@@ -198,6 +199,13 @@ static void test_lock_policy_bounds(void)
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "slip_min_rpm"));
     cfg.slip_min_rpm = 2001.0f;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "slip_min_rpm"));
+
+    cfg.slip_confirm_ms = 0; /* 0 = 立即锁，保留旧行为 */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "slip_confirm_ms"));
+    cfg.slip_confirm_ms = 60000;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "slip_confirm_ms"));
+    cfg.slip_confirm_ms = 60001;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "slip_confirm_ms"));
 
     cfg.servo_sim_speed_us_s = 100;
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "servo_sim_speed_us_s"));
@@ -376,7 +384,7 @@ static void test_unpack_rejects_bad_len_and_version(void)
 
     blob[0] = 0;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
-    blob[0] = 6; /* 比当前版本更新 → 认不出来，拒绝 */
+    blob[0] = 7; /* 比当前版本更新 → 认不出来，拒绝 */
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
 
     /* v1 版本号但只有 31 字节：残缺，拒绝 */
@@ -400,10 +408,15 @@ static void test_unpack_rejects_bad_len_and_version(void)
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 83, &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 84, &cfg));
 
-    /* v5：91 字节残缺拒绝，92 字节照收 */
+    /* v5：91 字节残缺拒绝，92 字节照收（确认期字段随后取默认） */
     blob[0] = 5;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 91, &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 92, &cfg));
+
+    /* v6：95 字节残缺拒绝，96 字节照收 */
+    blob[0] = 6;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 95, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 96, &cfg));
 
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(NULL, sizeof(blob), &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, sizeof(blob), NULL));
@@ -602,6 +615,7 @@ static void test_pack_unpack_v5_roundtrip(void)
     a.rc_sim = true;
     a.rc_sim_us[2] = 2100;
     a.servo_lock_us[1] = 900;
+    a.slip_confirm_ms = 4500;
 
     uint8_t blob[CFG_PARAMS_BLOB_SIZE];
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_pack(&a, blob, sizeof(blob)));
@@ -616,6 +630,7 @@ static void test_pack_unpack_v5_roundtrip(void)
     TEST_ASSERT_TRUE(b.rc_sim);
     TEST_ASSERT_EQUAL_INT(2100, b.rc_sim_us[2]);
     TEST_ASSERT_EQUAL_INT(900, b.servo_lock_us[1]);
+    TEST_ASSERT_EQUAL_INT(4500, b.slip_confirm_ms);
 }
 
 /* 按四期（v4）布局手工拼一条 84 字节 blob：遥控段照旧，尾部没有摄像头段。
@@ -668,6 +683,64 @@ static void test_v4_blob_migrates_to_camera_defaults(void)
     TEST_ASSERT_EQUAL_INT(def.cam_quality, cfg.cam_quality);
     TEST_ASSERT_EQUAL_INT(def.cam_fps_cap, cfg.cam_fps_cap);
     TEST_ASSERT_EQUAL_INT(def.overlay_mask, cfg.overlay_mask);
+    TEST_ASSERT_EQUAL_INT(def.slip_confirm_ms, cfg.slip_confirm_ms);
+}
+
+/* 按五期（v5）布局手工拼一条 92 字节 blob：尾部是摄像头段，没有确认期字段。
+ * 同样不复用打包代码，模拟旧固件写下的真实字节流。 */
+static void build_v5_blob(uint8_t buf[92])
+{
+    memset(buf, 0, 92);
+    buf[0] = 5;     /* v5 版本号 */
+    buf[32] = 1;    /* servo_sim */
+    buf[33] = 0x03; /* 两轴使能 */
+    buf[34] = CFG_SERVO_MODE_AUTO;
+    uint16_t unlock[2] = {1500, 1500};
+    uint16_t lock[2] = {2000, 2000};
+    uint16_t manual[2] = {1500, 1500};
+    memcpy(buf + 35, unlock, 4);
+    memcpy(buf + 39, lock, 4);
+    memcpy(buf + 43, manual, 4);
+    float engage = 0.30f, min_rpm = 10.0f;
+    memcpy(buf + 47, &engage, 4);
+    memcpy(buf + 51, &min_rpm, 4);
+    uint32_t hold = 3000, hold_max = 30000, probe = 2000, speed = 3000;
+    memcpy(buf + 55, &hold, 4);
+    memcpy(buf + 59, &hold_max, 4);
+    memcpy(buf + 63, &probe, 4);
+    memcpy(buf + 67, &speed, 4);
+    buf[76] = 1; /* rc_sim */
+    uint16_t sim[3] = {1000, 1600, 1400};
+    memcpy(buf + 77, sim, 6);
+    buf[84] = CFG_CAM_POLICY_ALWAYS;
+    buf[85] = CFG_CAM_RES_SVGA;
+    buf[86] = 7;
+    buf[87] = 22;
+    uint32_t overlay = CFG_CAM_OVERLAY_WHEELS | CFG_CAM_OVERLAY_SYS;
+    memcpy(buf + 88, &overlay, 4);
+}
+
+/* 22. v5 blob 迁移：摄像头字段原样解出，确认期取默认 3000ms 而不是 0（0=立即锁） */
+static void test_v5_blob_migrates_to_default_confirm(void)
+{
+    uint8_t v5[92];
+    build_v5_blob(v5);
+
+    cfg_params_t cfg;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(v5, sizeof(v5), &cfg));
+
+    TEST_ASSERT_EQUAL_INT(CFG_CAM_POLICY_ALWAYS, cfg.cam_policy);
+    TEST_ASSERT_EQUAL_INT(CFG_CAM_RES_SVGA, cfg.cam_res);
+    TEST_ASSERT_EQUAL_INT(7, cfg.cam_quality);
+    TEST_ASSERT_EQUAL_INT(22, cfg.cam_fps_cap);
+    TEST_ASSERT_EQUAL_INT(CFG_CAM_OVERLAY_WHEELS | CFG_CAM_OVERLAY_SYS, cfg.overlay_mask);
+    TEST_ASSERT_TRUE(cfg.rc_sim);
+    TEST_ASSERT_EQUAL_INT(1400, cfg.rc_sim_us[2]);
+
+    cfg_params_t def;
+    cfg_params_default(&def);
+    TEST_ASSERT_EQUAL_INT(3000, cfg.slip_confirm_ms);
+    TEST_ASSERT_EQUAL_INT(def.slip_confirm_ms, cfg.slip_confirm_ms);
 }
 
 NATIVE_TEST_MAIN(
@@ -690,6 +763,7 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_cam_bounds, "test_cam_bounds", __LINE__);
     UnityDefaultTestRun(test_pack_unpack_v5_roundtrip, "test_pack_unpack_v5_roundtrip", __LINE__);
     UnityDefaultTestRun(test_v4_blob_migrates_to_camera_defaults, "test_v4_blob_migrates_to_camera_defaults", __LINE__);
+    UnityDefaultTestRun(test_v5_blob_migrates_to_default_confirm, "test_v5_blob_migrates_to_default_confirm", __LINE__);
     UnityDefaultTestRun(test_unpack_rejects_bad_len_and_version, "test_unpack_rejects_bad_len_and_version", __LINE__);
     UnityDefaultTestRun(test_pack_guards, "test_pack_guards", __LINE__);
 )

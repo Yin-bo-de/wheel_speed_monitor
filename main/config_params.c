@@ -28,6 +28,8 @@ void cfg_params_default(cfg_params_t *cfg)
 
     cfg->slip_engage_ratio = 0.30f;
     cfg->slip_min_rpm = 10.0f;
+    /* 3 秒持续确认：单拍毛刺不触发机械锁，满 3 秒才认为真打滑 */
+    cfg->slip_confirm_ms = 3000;
     cfg->lock_hold_ms = 3000;
     cfg->lock_hold_max_ms = 30000;
     cfg->probe_window_ms = 2000;
@@ -123,6 +125,10 @@ esp_err_t cfg_params_validate(const cfg_params_t *cfg, const char *field)
         if (cfg->probe_window_ms < CFG_PROBE_WINDOW_MIN_MS ||
             cfg->probe_window_ms > CFG_PROBE_WINDOW_MAX_MS) {
             return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "slip_confirm_ms") == 0) {
+        if (cfg->slip_confirm_ms > CFG_SLIP_CONFIRM_MAX_MS) {
+            return ESP_ERR_INVALID_ARG; /* 0 合法：立即锁，保留旧行为 */
         }
     } else if (strcmp(field, "servo_sim_speed_us_s") == 0) {
         if (cfg->servo_sim_speed_us_s < CFG_SIM_SPEED_MIN ||
@@ -345,6 +351,20 @@ static void unpack_v5_segment(const uint8_t *buf, cfg_params_t *out)
     memcpy(&out->overlay_mask, buf + 88, 4);
 }
 
+/* ---- v6 段（92..95）：打滑确认期 ----
+ * 追加在 v5 段之后，旧段偏移一个字节都不动：旧固件写的 blob 照常解出，
+ * 只补一个默认确认期，升级后不会退化成"立即锁"。 */
+
+static void pack_v6_segment(const cfg_params_t *cfg, uint8_t *buf)
+{
+    memcpy(buf + 92, &cfg->slip_confirm_ms, 4);
+}
+
+static void unpack_v6_segment(const uint8_t *buf, cfg_params_t *out)
+{
+    memcpy(&out->slip_confirm_ms, buf + 92, 4);
+}
+
 esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
 {
     if (cfg == NULL || buf == NULL || len < CFG_PARAMS_BLOB_SIZE) {
@@ -355,6 +375,7 @@ esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
     pack_v3_segment(cfg, buf);
     pack_v4_segment(cfg, buf);
     pack_v5_segment(cfg, buf);
+    pack_v6_segment(cfg, buf);
     return ESP_OK;
 }
 
@@ -400,6 +421,16 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v4_segment(buf, out);
         return ESP_OK; /* 摄像头字段保持默认；上层随后回写 v5 */
     }
+    if (buf[0] == CFG_PARAMS_BLOB_VERSION_5) {
+        if (len < CFG_PARAMS_BLOB_SIZE_V5) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        unpack_v1_segment(buf, out);
+        unpack_v3_segment(buf, out);
+        unpack_v4_segment(buf, out);
+        unpack_v5_segment(buf, out);
+        return ESP_OK; /* 确认期保持默认 3000ms；上层随后回写 v6 */
+    }
     if (buf[0] == CFG_PARAMS_BLOB_VERSION) {
         if (len < CFG_PARAMS_BLOB_SIZE) {
             return ESP_ERR_INVALID_ARG;
@@ -408,6 +439,7 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v3_segment(buf, out);
         unpack_v4_segment(buf, out);
         unpack_v5_segment(buf, out);
+        unpack_v6_segment(buf, out);
         return ESP_OK;
     }
     return ESP_ERR_INVALID_VERSION;

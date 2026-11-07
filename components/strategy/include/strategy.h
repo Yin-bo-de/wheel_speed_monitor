@@ -52,6 +52,9 @@ typedef struct {
 
     float slip_engage_ratio; /* 打滑进入门槛（左右速差比例） */
     float slip_min_rpm;      /* 低于此转速不判定：静止时比值无意义 */
+    /* 首次判定打滑后需连续满足多久才进入 LOCKED；期间断一拍就重新计时。
+     * 0 = 立即锁定（旧行为），便于对照确认期本身的影响。 */
+    uint32_t slip_confirm_ms;
     uint32_t lock_hold_ms;      /* 初始锁定保持时长（"地形时间"） */
     uint32_t lock_hold_max_ms;  /* 保持时长翻倍上限 */
     uint32_t probe_window_ms;   /* 试探窗口：车连续动满此时长才算脱困 */
@@ -72,7 +75,7 @@ typedef struct {
 } strategy_state_t;
 
 /* 填入缺省配置（两档脉宽 解锁 1500 / 锁定 2000、使能、自动模式、
- * 门槛 0.30、最低 10 转/分、保持 3000ms、上限 30000ms、试探 2000ms）。 */
+ * 门槛 0.30、最低 10 转/分、确认 3000ms、保持 3000ms、上限 30000ms、试探 2000ms）。 */
 void strategy_config_default(strategy_config_t *cfg);
 
 /* 复位状态机与保持计时。模式/使能/映射/门槛变更后由上层调用，

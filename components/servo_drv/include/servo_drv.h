@@ -28,7 +28,10 @@ extern "C" {
 #define SERVO_LEDC_DUTY_BITS 14
 #define SERVO_LEDC_DUTY_RES LEDC_TIMER_14_BIT
 #define SERVO_LEDC_SPEED_MODE LEDC_LOW_SPEED_MODE
-#define SERVO_LEDC_TIMER LEDC_TIMER_0
+/* 相机 XCLK 用 LEDC_TIMER_0 / CHANNEL_0。舵机必须避开这一组，否则
+ * ledc_timer_config(50Hz) 会把相机 XCLK 从 20MHz 改成 50Hz，画面直接停。 */
+#define SERVO_LEDC_TIMER LEDC_TIMER_1
+#define SERVO_LEDC_CHANNEL_BASE LEDC_CHANNEL_2
 
 /* 调用方须传零初始化的实例（用 static 即可）：inited 是"是否已 bring-up"的
  * 唯一依据，靠它把重复初始化挡在外面，不做 memset 复位。 */
