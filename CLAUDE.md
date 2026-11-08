@@ -79,9 +79,15 @@ ctest --test-dir tests/native/build --output-on-failure
   cache 不丢状态）。新固件启动后 `app_main` 在 httpd 就绪时调用
   `bench_ota_mark_valid()`，没确认就崩溃会被 bootloader 回滚。分区表变更、
   版本号维护和首次 USB 烧录见 README「无线固件升级」。
+- **远程日志不新增任务**：`bench_log` 在 `app_main` 最早期 mount storage 上的
+  LittleFS、装 vprintf 钩子；esp_timer 每 2s 刷盘（脏字节 >4KB 提前），单文件
+  128KiB 封顶、总量 6MiB 配额。挂载失败不自动格式化（只有全 0xFF 的空分区
+  格式化一次），降级为只保留实时视图。OTA 上传/回退前必须
+  `bench_log_flush_now()`，上传期间 `bench_log_suspend(true)`。纯逻辑在
+  `log_core`，改轮转/配额/命名规则先补宿主机测试。
 - **httpd URI 槽位**：`HTTPD_DEFAULT_CONFIG()` 默认 `max_uri_handlers=8`，
-  现在页面 4 + 相机 2 + OTA 3 共 9 个，已显式扩到 12。新增端点时先核对这个数，
-  注册失败会让 `bench_http_server_start` 返回错误、设备启动即 abort。
+  现在页面 4 + 相机 2 + OTA 3 + 日志 3 共 12 个，已显式扩到 16。新增端点时先
+  核对这个数，注册失败会让 `bench_http_server_start` 返回错误、设备启动即 abort。
 - 队列/锁都在 main/ 静态共享（bench_http_server 经 ctx 引用）：
   - `s_cfg_mutex`（配置）、`s_frame_mutex`（最新帧）、`s_clients_mutex`（WS 客户端表）
   - 共享结构见 `main/wheel_bench.h`（bench_server_ctx_t）
@@ -126,7 +132,23 @@ main（编排/任务/WiFi/httpd）
  ├─ cam_rate         网络自适应帧率与画质控制器（纯 C，宿主机可测）
  ├─ bench_cam        相机生命周期 / 发布缓冲 / cam_publish_task（IDF 依赖）
  │  └─ bench_cam_stream  /cam/stream 异步 MJPEG 与 /cam/snapshot（IDF 依赖）
- └─ bench_ota        OTA 上传 / 校验 / 回退端点（IDF 依赖，跑在 httpd 任务里）
+ ├─ bench_ota        OTA 上传 / 校验 / 回退端点（IDF 依赖，跑在 httpd 任务里）
+ └─ bench_log        远程日志：vprintf 钩子 → RAM 环形缓冲 → esp_timer 刷盘
+                     落 LittleFS（storage 分区，按小时轮转 + 6MiB 配额），
+                     /api/logs/{live,list,file} 端点；WS log_clock 浏览器对时。
+                     刷盘在 esp_timer 上下文，不新增 FreeRTOS 任务（IDF 依赖）
+    └─ log_core      日志纯逻辑：环形缓冲 / 文件名生成解析 / 轮转与配额
+                     删除决策（纯 C，宿主机可测）
 ```
 
 新增采集器步骤见 README「扩展」。
+
+## agent 协作规范（省 token 的分发方式）
+
+- 只读搜索分给 explore（haiku），代码修改分给 implementer（sonnet），方案不明确的先给
+  planner（opus）；规划不在主对话里自己做，主对话只做拆解、分发、验收。
+- 子任务 prompt 只写目标、约束、文件路径，不贴代码和文档全文；子代理看不到本会话的对话、
+  memory 和 skill，需要的经验用文件路径指过去（memory 目录里的 .md、
+  `~/.claude/esp32-dev-standards.md`），让子代理自己 Read。
+- 子代理报告按其定义中的格式限长，主代理不把原文转抄进主对话。
+- 个别任务超出默认模型能力时，用 Agent tool 的 model 参数临时升档（frontmatter 默认档不变）。

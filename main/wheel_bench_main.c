@@ -35,6 +35,7 @@
 
 #include "bench_cam.h"
 #include "bench_http_server.h"
+#include "bench_log.h"
 #include "bench_ota.h"
 #include "config_store.h"
 #include "rc_capture.h"
@@ -524,6 +525,15 @@ static void wifi_ap_start(void)
 void app_main(void)
 {
     ESP_ERROR_CHECK(nvs_flash_init());
+
+    /* 日志子系统最先起来：mount + 钩子装好后，本次启动日志才进得去
+     * 环形缓冲与文件。存储坏了会降级成只有实时视图；只有环/锁/定时器
+     * 起不来才返回错误。两种情况都不挡启动。 */
+    esp_err_t log_err = bench_log_init();
+    if (log_err != ESP_OK) {
+        ESP_LOGE(TAG, "bench_log_init: %s（远程日志不可用，仅串口）",
+                 esp_err_to_name(log_err));
+    }
 
     cfg_params_t cfg;
     ESP_ERROR_CHECK(config_store_load(&cfg));

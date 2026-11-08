@@ -1,7 +1,8 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
 # 双 OTA：两块 4MB app 交替写入，ota 失败由 bootloader 回滚。
 # nvs 偏移与旧的单 app 分区表一致，改分区表后配置不丢。
-# storage 本次不用，预留给日志/网页资源，省得以后再插一次 USB。
+# storage 由 bench_log 在运行时格式化成 LittleFS 存远程日志。子类型仍写 spiffs：
+# LittleFS 按 label 查找（SUBTYPE_ANY），这样已经烧过本分区表的板子不用重刷。
 nvs,      data, nvs,     0x9000,   0x6000,
 otadata,  data, ota,     0xF000,   0x2000,
 phy_init, data, phy,     0x11000,  0x1000,
