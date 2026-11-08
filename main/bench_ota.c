@@ -103,7 +103,8 @@ static esp_err_t send_error(httpd_req_t *req, const char *status, const char *ms
     return e;
 }
 
-static esp_err_t send_ok_restart(httpd_req_t *req, const char *version, size_t size)
+static esp_err_t send_ok_restart(httpd_req_t *req, const char *version,
+                                 const char *target, size_t size)
 {
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
@@ -111,6 +112,9 @@ static esp_err_t send_ok_restart(httpd_req_t *req, const char *version, size_t s
     }
     cJSON_AddBoolToObject(root, "ok", true);
     cJSON_AddStringToObject(root, "version", version);
+    /* 页面重启后要拿这个真实目标分区比对，不能依赖升级前的 /api/ota/info
+     * 快照：页面跨过一次重启/刷机后，快照里的 other 可能已经过期 */
+    cJSON_AddStringToObject(root, "target", target ? target : "");
     cJSON_AddNumberToObject(root, "size", (double)size);
     cJSON_AddNumberToObject(root, "restart_in_ms", 2000);
     char *json = cJSON_PrintUnformatted(root);
@@ -296,7 +300,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
         return send_error(req, "500 Internal Server Error", fail_msg);
     }
 
-    esp_err_t e = send_ok_restart(req, new_version, received);
+    esp_err_t e = send_ok_restart(req, new_version, part_name(part), received);
     if (e != ESP_OK) {
         /* 启动分区已经切过去了，重启是唯一一致的动作。不重启会让页面
          * 以为失败，可设备下次重启却进了新固件。 */
@@ -339,7 +343,7 @@ static esp_err_t handle_rollback(httpd_req_t *req)
     }
     char version[33] = "";
     copy_field(version, sizeof(version), desc.version, sizeof(desc.version));
-    esp_err_t e = send_ok_restart(req, version, 0);
+    esp_err_t e = send_ok_restart(req, version, part_name(other), 0);
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "rollback response failed (%s), restart anyway", esp_err_to_name(e));
     }

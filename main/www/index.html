@@ -1305,6 +1305,8 @@ function connectWS() {
     send({ type: "log_clock", ts: Date.now() });
     /* 断线重连后按当前 tab 补发预览状态，避免服务端还停在不可见计时里。 */
     camSendPreview(activeTab === "camera" && !document.hidden);
+    /* 设备重启后靠 WS 重连确认 OTA；平时重连也顺手刷新版本卡片 */
+    otaOnWSReconnect();
   };
   ws.onmessage = e => { try { lastFrame = JSON.parse(e.data); applyFrame(lastFrame); } catch (_) {} };
   ws.onclose = () => { $("status-dot").className = "warn"; $("status-text").textContent = otaInProgress ? "设备重启中，等待重新连接…" : "断开，重连中…"; setTimeout(connectWS, Math.min(1000 * ++reconnect, 5000)); };
@@ -1316,11 +1318,21 @@ let otaInfo = null;
 let otaConfirmKind = null;
 /* 本次升级/回退期望启动的分区；设备回来后 running 必须等于它。 */
 let otaTargetPartition = null;
+/* 成功只收尾一次：WS 重连和轮询可能同时看到新固件 */
+let otaFinishScheduled = false;
 
 function otaMsg(text, cls) {
   const el = $("ota-msg");
   el.textContent = text || "";
   el.className = "ota-msg" + (cls ? " " + cls : "");
+}
+
+function otaFinishSuccess() {
+  if (otaFinishScheduled) return;
+  otaFinishScheduled = true;
+  otaInProgress = false;
+  otaMsg("升级完成，页面即将刷新。", "ok");
+  setTimeout(() => location.reload(), 800);
 }
 
 function otaRenderInfo(info) {
@@ -1390,8 +1402,10 @@ async function otaOnFileChange() {
     const meta = await otaParseFile(f);
     const cmp = otaInfo ? otaVersionCmp(meta.version, otaInfo.version) : null;
     const dir = cmp === null ? "版本不同" : cmp > 0 ? "升级" : cmp < 0 ? "降级" : "版本相同";
+    /* 同版本号的两块固件（改代码没改 PROJECT_VER）只能靠编译时间区分 */
     $("ota-file-name").textContent =
-      `${f.name} · ${Math.round(f.size / 1024)} KB · v${meta.version || "?"} · ${dir}`;
+      `${f.name} · ${Math.round(f.size / 1024)} KB · v${meta.version || "?"} · ${dir}` +
+      (meta.built ? ` · ${meta.built}` : "");
     $("ota-file").dataset.meta = JSON.stringify(meta);
     $("ota-start").disabled = otaInProgress;
   } catch (e) {
@@ -1427,6 +1441,7 @@ function otaStartClick() {
 
 function otaSetBusy(on) {
   otaInProgress = on;
+  if (on) otaFinishScheduled = false;
   $("ota-start").disabled = on || !$("ota-file").files[0];
   $("ota-rollback").disabled = true;
   $("ota-card").classList.toggle("disabled", on);
@@ -1467,6 +1482,8 @@ function otaUpload() {
     let r = null;
     try { r = JSON.parse(xhr.responseText); } catch (_) {}
     if (xhr.status >= 200 && xhr.status < 300 && r && r.ok) {
+      /* 用设备回报的真实目标分区，覆盖升级前 /api/ota/info 的快照 */
+      if (r.target) otaTargetPartition = r.target;
       otaWaitReboot(r);
     } else {
       otaSetBusy(false);
@@ -1498,7 +1515,29 @@ function otaFetchInfoWithTimeout() {
   });
 }
 
+/* 设备活着且升级任务已结束时的统一收尾：切到目标分区就报成功；没切到
+ * （回滚、快照过期或真失败）也把实际状态亮一下再刷新页面，不让页面停在
+ * 旧版本上等人手动刷。返回 true 表示已经安排了刷新。 */
+function otaHandleDeviceBack(info) {
+  if (!info || info.busy || otaFinishScheduled) return false;
+  const switched = !otaTargetPartition || info.running === otaTargetPartition;
+  if (switched) {
+    otaFinishSuccess();
+    return true;
+  }
+  otaSetBusy(false);
+  otaRenderInfo(info);
+  const running = info.running || "未知分区";
+  const version = info.version ? "v" + info.version : "版本未知";
+  otaMsg(`设备已重启，当前运行 ${running}（${version}），不是目标分区 ` +
+    `${otaTargetPartition || "?"}；页面即将刷新，刷新后可以看实际版本。`, "warn");
+  otaFinishScheduled = true;
+  setTimeout(() => location.reload(), 1500);
+  return true;
+}
+
 async function otaWaitReboot(result) {
+  if (result && result.target) otaTargetPartition = result.target;
   $("ota-bar").style.width = "100%";
   otaMsg(result && result.version
     ? `写入完成（v${result.version}），设备重启中…`
@@ -1506,22 +1545,54 @@ async function otaWaitReboot(result) {
   $("status-text").textContent = "设备重启中，等待重新连接…";
   await new Promise(r => setTimeout(r, 3000));
   for (let i = 0; i < 30; i++) {
+    if (otaFinishScheduled) return;
     try {
       const info = await otaFetchInfoWithTimeout();
       /* 必须看到 running 真切到目标分区。只看 busy=false 会把「请求没
-       * 发出去、设备一直跑旧固件」误判成升级成功。 */
-      const switched = !otaTargetPartition || info.running === otaTargetPartition;
-      if (!info.busy && switched) {
-        otaMsg("升级完成，页面即将刷新。", "ok");
-        setTimeout(() => location.reload(), 800);
-        return;
-      }
+       * 发出去、设备一直跑旧固件」误判成升级成功。WS 重连路径也会收尾，
+       * 谁先看到谁负责（otaFinishSuccess 只执行一次）。 */
+      if (otaHandleDeviceBack(info)) return;
     } catch (_) {}
     await new Promise(r => setTimeout(r, 1000));
   }
+  if (otaFinishScheduled) return;
+  /* 轮询超时不再直接断言「没切」：再查一次，查到就收尾并自动刷新，
+   * 查不到就如实说无法确认。手机热点重连慢于 30 秒很常见。 */
+  let last = null;
+  try { last = await otaFetchInfoWithTimeout(); } catch (_) {}
+  if (otaHandleDeviceBack(last)) return;
   otaSetBusy(false);
-  otaMsg("设备没有切到目标分区。检查是否断电、是否自动回滚，或手动连回 wheel-bench 热点后刷新页面。", "err");
-  otaRefresh();
+  if (last) {
+    otaRenderInfo(last);
+    const running = last.running || "未知分区";
+    const version = last.version ? "v" + last.version : "版本未知";
+    const reason = last.busy
+      ? "设备上的升级任务还没结束。"
+      : last.other_state === "aborted"
+        ? "另一块分区已因启动失败被标记为 aborted，设备自动回滚。"
+        : `没有确认 running 切到 ${otaTargetPartition || "目标分区"}。`;
+    otaMsg(`设备当前运行 ${running}（${version}），${reason}`, "err");
+  } else {
+    otaMsg("30 秒内连不上设备，无法确认是否完成切换。热点恢复后刷新页面，看当前版本和运行分区。", "warn");
+  }
+}
+
+/* 设备重启回来后 WS 会重连：这时新固件已经能提供 /api/ota/info，比在
+ * 30 秒窗口里赌手机 Wi-Fi 什么时候连回来可靠得多。 */
+function otaOnWSReconnect() {
+  if (!otaInProgress) {
+    /* 卡片只在进设置页时刷新，重连后补一次，避免一直显示旧版本 */
+    otaRefresh();
+    return;
+  }
+  otaConfirmReboot().catch(() => {});
+}
+
+async function otaConfirmReboot() {
+  if (!otaInProgress || otaFinishScheduled) return;
+  const info = await otaFetchInfoWithTimeout();
+  if (!otaInProgress || otaFinishScheduled) return;
+  otaHandleDeviceBack(info);
 }
 
 function otaRollback() {
