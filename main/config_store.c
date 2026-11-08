@@ -68,3 +68,20 @@ esp_err_t config_store_save(const cfg_params_t *cfg)
     nvs_close(h);
     return e;
 }
+
+uint32_t config_store_next_boot_seq(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(CFG_NS, NVS_READWRITE, &h) != ESP_OK) {
+        return 0; /* 读不到就从头计数，只影响未对时文件的排序 */
+    }
+    uint32_t seq = 0;
+    nvs_get_u32(h, "bootseq", &seq);
+    seq++;
+    if (nvs_set_u32(h, "bootseq", seq) != ESP_OK || nvs_commit(h) != ESP_OK) {
+        nvs_close(h);
+        return 0;
+    }
+    nvs_close(h);
+    return seq;
+}

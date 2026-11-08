@@ -3,3 +3,6 @@
 dependencies:
   idf: ">=5.1"
   espressif/esp32-camera: "2.1.8"
+  ## 日志分区（storage）文件系统：掉电安全，mount 失败不会 format 掉历史日志。
+  ## 组件原名 esp_littlefs，已更名 joltwallet/littlefs（头文件仍 esp_littlefs.h）
+  joltwallet/littlefs: "1.23.1"

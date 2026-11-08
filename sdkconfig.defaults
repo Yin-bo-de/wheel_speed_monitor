@@ -1,6 +1,6 @@
 # ---- wheel_speed_monitor v1 固化配置 ----
 # 双 OTA 分区：新固件写入另一块，启动失败可回滚。
-# 16MB Flash 切成两块 4MB app，剩余 7.9MB 预留给日志/网页资源。
+# 16MB Flash 切成两块 4MB app，剩余 7.9MB 的 storage 分区存远程日志。
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
@@ -28,6 +28,11 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 
 # WebSocket 支持（httpd_ws_frame_t 等类型由此门控）
 CONFIG_HTTPD_WS_SUPPORT=y
+
+# 远程日志的 vprintf 钩子按 v1 的“一次回调一整行”工作；v2 会把前缀/正文/
+# 换行拆成多次回调，钩子需要额外的拼行状态。显式钉住，避免 IDF 升级后
+# 日志文件里出现半行。
+CONFIG_LOG_VERSION_1=y
 # 注：httpd 栈无对应 Kconfig 符号（原 CONFIG_HTTPD_STACK_SIZE 在 IDF 5.5 不存在），
 # 实际由 httpd_config_t.stack_size 设置（main/bench_http_server.c）。
 
@@ -45,3 +50,8 @@ CONFIG_CAMERA_CORE1=y
 # 注：CONFIG_CAMERA_PSRAM_DMA 实测不能用（见 camera_drv.c 的 PLL 注释）：
 # DMA 直写 PSRAM 帧缓冲后取帧要走 cache 同步，PCLK 20MHz 时几乎每帧
 # NO-EOI、grab 掉到 1fps，比乒乓拷贝模式差得多。保持关闭。
+
+# ---- 远程日志文件系统（joltwallet/littlefs） ----
+# storage 分区由 bench_log_init() 首次挂载：空分区（全 0xFF）格式化一次；
+# 有数据但挂载失败时保留历史、只关闭远程日志，不会自动格式化。
+# 单文件 128KiB 封顶、总配额 6MiB 是 bench_log.c 的常量，没有对应 Kconfig。

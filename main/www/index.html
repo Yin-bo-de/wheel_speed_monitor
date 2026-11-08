@@ -129,6 +129,24 @@
   .ota-confirm .row { margin-bottom:8px; color:var(--text); }
   .ota-danger { border-color:#7f3b3b; }
   #ota-file { font-size:11px; color:var(--dim); max-width:100%; }
+
+  /* ---- 日志 ---- */
+  .log-tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; font-size:12px; }
+  .log-tools label { display:flex; align-items:center; gap:4px; }
+  .log-tools input[type=text] { flex:1 1 140px; min-width:0; background:#222; color:var(--text);
+    border:1px solid var(--border); border-radius:4px; padding:4px 6px; }
+  .log-tools select { width:auto; flex:1 1 220px; min-width:0; }
+  .log-view { background:#151515; border:1px solid var(--border); border-radius:6px;
+    margin-top:8px; padding:6px 8px; height:320px; overflow:auto;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; line-height:1.45;
+    white-space:pre-wrap; word-break:break-all; }
+  .log-view .log-gap { color:#666; font-style:italic; }
+  /* E 红、W 黄，I/D 保持原样：E/W 是排查时第一眼要找的行 */
+  .log-view .log-lvl-e { color:#ff4d4f; }
+  .log-view .log-lvl-w { color:#ffd54f; }
+  .log-view .log-lvl-d { color:#8fa3ad; }
+  .log-view .log-hit { background:#5a4a1e; color:#fff; border-radius:2px; }
+  .log-view .log-hit.cur { background:#b8860b; }
 </style>
 </head>
 <body>
@@ -143,6 +161,7 @@
   <button class="tab active" data-tab="monitor">监测</button>
   <button class="tab" data-tab="camera">图传</button>
   <button class="tab" data-tab="settings">设置</button>
+  <button class="tab" data-tab="logs">日志</button>
 </nav>
 
 <main>
@@ -372,6 +391,44 @@
       之后都从这里升级。设备重启期间页面会等待并自动刷新。</p>
   </div>
 </section>
+
+<section id="view-logs" hidden>
+  <div class="card">
+    <h2>实时日志 <span class="note" id="log-live-status">未开始</span></h2>
+    <div class="log-tools">
+      <button id="log-live-btn">● 实时日志</button>
+      <label><input type="checkbox" id="log-follow" checked> 自动滚动</label>
+      <span class="note">切离本页自动暂停，切回自动续上</span>
+    </div>
+    <div class="log-view" id="log-live-view"></div>
+    <p class="hint">设备端环缓冲只有 256 行：长时间离开后回来，中间丢的行会用灰色分隔行标出；页面最多保留最近 1000 行。</p>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>历史日志</h2>
+    <div class="log-tools">
+      <select id="log-file-sel"></select>
+      <button id="log-reload">刷新列表</button>
+      <button id="log-download">下载本文件</button>
+    </div>
+    <div class="log-tools">
+      <input type="text" id="log-search" placeholder="关键词搜索（回车执行）">
+      <button id="log-search-btn">搜索</button>
+      <button id="log-search-prev">上一条</button>
+      <button id="log-search-next">下一条</button>
+      <span class="note" id="log-search-count"></span>
+    </div>
+    <div class="log-tools">
+      <span class="note">级别</span>
+      <label><input type="checkbox" id="log-lv-e" checked> E</label>
+      <label><input type="checkbox" id="log-lv-w" checked> W</label>
+      <label><input type="checkbox" id="log-lv-i" checked> I</label>
+      <label><input type="checkbox" id="log-lv-d" checked> D</label>
+      <span class="note">（按行首 E/W/I/D (ms) 前缀判定，无前缀续行不受过滤）</span>
+    </div>
+    <div class="log-view" id="log-file-view"></div>
+  </div>
+</section>
 </main>
 
 <script>
@@ -508,7 +565,10 @@ function showTab(name) {
   $("view-camera").hidden = false;
   $("view-camera").classList.toggle("tab-passive", name !== "camera");
   $("view-settings").hidden = (name !== "settings");
+  $("view-logs").hidden = (name !== "logs");
   if (prev !== name) {
+    if (name === "logs") logsTabEnter();
+    if (prev === "logs") logsTabLeave();
     camSendPreview(name === "camera");
     if (name === "camera") {
       camSyncView();
@@ -1240,6 +1300,9 @@ function connectWS() {
     $("status-dot").className = "ok";
     $("status-text").textContent = otaInProgress ? "设备重启中，等待重新连接…" : "已连接";
     reconnect = 0;
+    /* 浏览器对时：设备无 NTP，服务端按 type 路由；每次连上（含重连）都重发，
+     * 持续校准漂移。 */
+    send({ type: "log_clock", ts: Date.now() });
     /* 断线重连后按当前 tab 补发预览状态，避免服务端还停在不可见计时里。 */
     camSendPreview(activeTab === "camera" && !document.hidden);
   };
@@ -1484,6 +1547,314 @@ function otaRollbackClick() {
     `确认回退到 v${otaInfo.other_version}？设备将重启。`);
 }
 
+/* ---- 日志 ---- */
+let logLiveOn = false, logLiveTimer = null, logLiveBusy = false, logLiveGen = 0;
+let logLiveCursor = null;   /* 下次要向 /api/logs/live 要 seq > cursor 的行 */
+let logLiveBoot = null;     /* 设备 boot 序号：变了就清屏，识别重启 */
+let logFileText = "", logFileName = "", logLoadToken = 0;
+let logSearchKw = "", logHits = [], logHitIdx = -1;
+
+function logsEsc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function logsFmtSize(n) {
+  if (!Number.isFinite(n)) return "?";
+  if (n < 1024) return n + " B";
+  return Math.round(n / 1024) + " KB";
+}
+
+function logsDayGroup(ds) {
+  const dt = new Date(+ds.slice(0, 4), +ds.slice(4, 6) - 1, +ds.slice(6, 8));
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((today - dt) / 86400000);
+  return diff <= 0 ? "今天" : diff === 1 ? "昨天" : "更早";
+}
+
+function logsLiveToggle() {
+  if (logLiveOn) {
+    logLiveOn = false;
+    if (logLiveTimer) { clearInterval(logLiveTimer); logLiveTimer = null; }
+    $("log-live-btn").textContent = "● 实时日志";
+    $("log-live-status").textContent = "已停止";
+    return;
+  }
+  logLiveOn = true;
+  logLiveGen++;
+  logLiveCursor = null;
+  logLiveBoot = null;
+  $("log-live-view").textContent = "";
+  $("log-live-btn").textContent = "■ 停止实时";
+  if (activeTab === "logs") {
+    $("log-live-status").textContent = "轮询中…";
+    logLivePoll();
+    logLiveTimer = setInterval(logLivePoll, 1000);
+  } else {
+    $("log-live-status").textContent = "等待进入日志页";
+  }
+}
+
+function logsTabEnter() {
+  logsRefreshList();
+  /* 开关状态保留：切走时轮询已停，切回从这里续上 */
+  if (!logLiveOn) return;
+  $("log-live-status").textContent = "轮询中…";
+  logLivePoll();
+  logLiveTimer = setInterval(logLivePoll, 1000);
+}
+
+function logsTabLeave() {
+  if (logLiveTimer) { clearInterval(logLiveTimer); logLiveTimer = null; }
+  if (logLiveOn) $("log-live-status").textContent = "已暂停（离开本页）";
+}
+
+async function logLivePoll() {
+  if (!logLiveOn || logLiveBusy || document.hidden) return;
+  logLiveBusy = true;
+  const gen = logLiveGen;
+  try {
+    const url = "/api/logs/live" + (logLiveCursor === null ? "" : "?cursor=" + logLiveCursor);
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const d = await r.json();
+    if (!logLiveOn || gen !== logLiveGen) return;
+    if (!Number.isFinite(d.seq)) throw new Error("响应缺少 seq");
+    const view = $("log-live-view");
+    /* boot 变了 = 设备重启：seq 从 1 重数，光比较大小可能恰好撞上旧 cursor，
+     * 清屏并丢掉这一拍，下一拍按首帧拿最新 50 行 */
+    const bootKnown = Number.isFinite(d.boot);
+    const bootChanged = logLiveBoot !== null && bootKnown && d.boot !== logLiveBoot;
+    if (bootKnown && logLiveBoot === null) logLiveBoot = d.boot;
+    if (bootChanged) {
+      view.textContent = "";
+      logLiveCursor = null;
+      logLiveBoot = d.boot;
+    } else if (logLiveCursor !== null && d.seq < logLiveCursor) {
+      /* 没有 boot 字段的旧固件兜底：seq 回卷也清屏 */
+      view.textContent = "";
+      logLiveCursor = null;
+    } else {
+      /* cursor 是最后收到的行，丢失的是 cursor+1..oldest-1，共 oldest-cursor-1 行；
+       * 恰好衔接（oldest == cursor+1）时为 0，不插提示 */
+      let gap = 0;
+      if (logLiveCursor !== null && Number.isFinite(d.oldest) && logLiveCursor < d.oldest) {
+        gap = Math.max(0, d.oldest - logLiveCursor - 1);
+      }
+      logsLiveAppend(view, d.lines, gap);
+      logLiveCursor = d.seq;
+    }
+    $("log-live-status").textContent = "轮询中… seq " + d.seq;
+    $("log-live-status").className = "note";
+  } catch (e) {
+    $("log-live-status").textContent = "取日志失败：" + (e.message || e);
+    $("log-live-status").className = "slip";
+  } finally {
+    logLiveBusy = false;
+  }
+}
+
+function logsLiveAppend(view, lines, gap) {
+  const follow = $("log-follow").checked;
+  if (gap > 0) {
+    const d = document.createElement("div");
+    d.className = "log-gap";
+    d.textContent = "— 丢失 " + gap + " 行 —";
+    view.appendChild(d);
+  }
+  const arr = Array.isArray(lines) ? lines : [];
+  for (const line of arr) {
+    const d = document.createElement("div");
+    const m = String(line).match(/^([EWID]) \(\d+\)/);
+    d.className = "log-line" + (m ? " log-lvl-" + m[1].toLowerCase() : "");
+    d.textContent = line;
+    view.appendChild(d);
+  }
+  /* DOM 只保留最近 1000 行；用户向上翻时把裁掉的高度补回 scrollTop，视口不跳 */
+  const overflow = view.children.length - 1000;
+  if (overflow > 0) {
+    const before = view.scrollHeight;
+    for (let i = 0; i < overflow; i++) view.removeChild(view.firstChild);
+    if (!follow) view.scrollTop -= before - view.scrollHeight;
+  }
+  if (follow) view.scrollTop = view.scrollHeight;
+}
+
+function logsFollowScroll() {
+  /* 向上滚自动暂停跟随，拉到底自动恢复 */
+  const el = $("log-live-view");
+  $("log-follow").checked = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+}
+
+function logsRenderList(d) {
+  const sel = $("log-file-sel");
+  const files = Array.isArray(d.files) ? d.files : [];
+  const items = [];
+  for (const f of files) {
+    if (!f || !f.f) continue;
+    let m = String(f.f).match(/^log_(\d{8})_(\d{2})\.log$/);
+    if (m) {
+      const ds = m[1];
+      items.push({ f: f.f, kind: "date", group: logsDayGroup(ds),
+        label: ds.slice(0, 4) + "-" + ds.slice(4, 6) + "-" + ds.slice(6, 8) + " " + m[2] + "时 · " +
+          logsFmtSize(f.size) + (f.cur ? " · 写入中" : "") });
+      continue;
+    }
+    m = String(f.f).match(/^log_b(\d{4})_(\d{3})\.log$/);
+    if (m) {
+      items.push({ f: f.f, kind: "boot", boot: +m[1], hh: +m[2], group: "未对时",
+        label: "未对时 (boot #" + (+m[1]) + " 第 " + (+m[2]) + " 小时) · " +
+          logsFmtSize(f.size) + (f.cur ? " · 写入中" : "") });
+      continue;
+    }
+    items.push({ f: f.f, kind: "other", group: "更早", label: f.f + " · " + logsFmtSize(f.size) });
+  }
+  if (!items.length) {
+    sel.innerHTML = '<option value="">（暂无日志文件）</option>';
+    return;
+  }
+  const buckets = {};
+  for (const it of items) (buckets[it.group] = buckets[it.group] || []).push(it);
+  sel.innerHTML = "";
+  for (const g of ["未对时", "今天", "昨天", "更早"]) {
+    const arr = buckets[g];
+    if (!arr || !arr.length) continue;
+    /* b 前缀文件排最前（时间序上位于同 boot 日期文件之前）；日期文件名排序=时间排序 */
+    arr.sort((a, b) => {
+      if (a.kind === "boot" && b.kind === "boot") return b.boot - a.boot || b.hh - a.hh;
+      if (a.kind === "boot") return -1;
+      if (b.kind === "boot") return 1;
+      return String(b.f).localeCompare(String(a.f));
+    });
+    const og = document.createElement("optgroup");
+    og.label = g;
+    for (const it of arr) {
+      const o = document.createElement("option");
+      o.value = it.f;
+      o.textContent = it.label;
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+  /* 默认选中正在写的文件，没有就选最新一个 */
+  sel.value = (typeof d.cur_file === "string" && items.some(it => it.f === d.cur_file))
+    ? d.cur_file : sel.options[0].value;
+}
+
+async function logsRefreshList() {
+  const sel = $("log-file-sel");
+  sel.innerHTML = '<option value="">加载中…</option>';
+  let ok = false;
+  try {
+    const r = await fetch("/api/logs/list", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    logsRenderList(await r.json());
+    ok = true;
+  } catch (_) {
+    sel.innerHTML = '<option value="">列表加载失败</option>';
+  }
+  const name = ok ? sel.value : "";
+  if (name) logsLoadFile(name);
+  else { logFileText = ""; logFileName = ""; logsRenderFile(); }
+}
+
+async function logsLoadFile(name) {
+  if (!name) return;
+  const token = ++logLoadToken;
+  logFileName = name;
+  $("log-file-view").innerHTML = '<div class="log-gap">加载中…</div>';
+  let text = null, err = null;
+  try {
+    const r = await fetch("/api/logs/file?f=" + encodeURIComponent(name), { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    text = await r.text();
+  } catch (e) { err = e; }
+  if (token !== logLoadToken) return;  /* 快速切换文件时丢弃过期响应 */
+  if (err !== null) {
+    logFileText = "";
+    $("log-file-view").innerHTML = '<div class="log-gap">加载失败：' + logsEsc(err.message || err) + '</div>';
+    $("log-search-count").textContent = "";
+    return;
+  }
+  logFileText = text;
+  logsRenderFile();
+}
+
+function logsHighlight(line, kw) {
+  if (!kw) return logsEsc(line);
+  const lower = line.toLowerCase(), k = kw.toLowerCase();
+  let out = "", i = 0;
+  for (;;) {
+    const j = lower.indexOf(k, i);
+    if (j < 0) return out + logsEsc(line.slice(i));
+    out += logsEsc(line.slice(i, j)) +
+      '<span class="log-hit">' + logsEsc(line.slice(j, j + k.length)) + '</span>';
+    i = j + k.length;
+  }
+}
+
+function logsRenderFile() {
+  const view = $("log-file-view");
+  logHits = [];
+  logHitIdx = -1;
+  if (!logFileName) {
+    view.innerHTML = '<div class="log-gap">（未选择文件）</div>';
+    $("log-search-count").textContent = "";
+    return;
+  }
+  if (!logFileText) {
+    view.innerHTML = '<div class="log-gap">（文件为空）</div>';
+    $("log-search-count").textContent = "";
+    return;
+  }
+  const lvOn = {
+    E: $("log-lv-e").checked, W: $("log-lv-w").checked,
+    I: $("log-lv-i").checked, D: $("log-lv-d").checked,
+  };
+  const lines = logFileText.split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  let html = "";
+  for (const line of lines) {
+    const m = line.match(/^([EWID]) \(\d+\)/);
+    const lvl = m ? m[1] : null;
+    if (lvl && !lvOn[lvl]) continue;
+    html += '<div class="log-line' + (lvl ? " log-lvl-" + lvl.toLowerCase() : "") + '">' +
+      logsHighlight(line, logSearchKw) + '</div>';
+  }
+  view.innerHTML = html || '<div class="log-gap">（全部被级别过滤隐藏）</div>';
+  if (logSearchKw) {
+    logHits = Array.from(view.querySelectorAll("span.log-hit"));
+    $("log-search-count").textContent = "0/" + logHits.length;
+  } else {
+    $("log-search-count").textContent = "";
+  }
+  view.scrollTop = 0;
+}
+
+function logsApplySearch() {
+  logSearchKw = $("log-search").value.trim();
+  logsRenderFile();
+  if (logSearchKw && logHits.length) logsJump(1);
+}
+
+function logsJump(step) {
+  const n = logHits.length;
+  if (!n) return;
+  let idx;
+  if (logHitIdx < 0) idx = (step > 0) ? 0 : n - 1;
+  else idx = (logHitIdx + step + n) % n;
+  if (logHitIdx >= 0 && logHits[logHitIdx]) logHits[logHitIdx].classList.remove("cur");
+  logHitIdx = idx;
+  logHits[logHitIdx].classList.add("cur");
+  logHits[logHitIdx].scrollIntoView({ block: "nearest" });
+  $("log-search-count").textContent = (logHitIdx + 1) + "/" + n;
+}
+
+function logsDownloadFile() {
+  if (!logFileName) return;
+  window.open("/api/logs/file?f=" + encodeURIComponent(logFileName), "_blank");
+}
+
 function poll() { fetch(API).then(r => r.json()).then(f => { if (!lastFrame) applyFrame(f); }).catch(() => {}); }
 
 function send(cmd) {
@@ -1595,6 +1966,20 @@ window.addEventListener("DOMContentLoaded", () => {
   };
   $("ota-confirm-no").onclick = otaCancelConfirm;
   otaRefresh();
+
+  /* 日志 tab */
+  $("log-live-btn").onclick = logsLiveToggle;
+  $("log-live-view").addEventListener("scroll", logsFollowScroll);
+  $("log-file-sel").onchange = () => logsLoadFile($("log-file-sel").value);
+  $("log-reload").onclick = logsRefreshList;
+  $("log-download").onclick = logsDownloadFile;
+  $("log-search-btn").onclick = logsApplySearch;
+  $("log-search").addEventListener("keydown", e => { if (e.key === "Enter") logsApplySearch(); });
+  $("log-search-prev").onclick = () => logsJump(-1);
+  $("log-search-next").onclick = () => logsJump(1);
+  ["log-lv-e", "log-lv-w", "log-lv-i", "log-lv-d"].forEach(id => {
+    $(id).addEventListener("change", logsRenderFile);
+  });
 
   $("cam-view").addEventListener("load", camUpdateViewGeometry);
   $("cam-view").addEventListener("error", () => {

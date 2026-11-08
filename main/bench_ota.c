@@ -7,6 +7,7 @@
 #include "bench_ota.h"
 
 #include "bench_cam.h"
+#include "bench_log.h"
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -215,6 +216,8 @@ static esp_err_t handle_upload(httpd_req_t *req)
     }
 
     s_ota_busy = true;
+    bench_log_flush_now(); /* 崩溃/重启前的日志都落盘，再停写避开与 OTA 写交错 */
+    bench_log_suspend(true);
     bench_cam_suspend_for_ota();
 
     esp_ota_handle_t handle = 0;
@@ -222,6 +225,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ota_begin failed: %s", esp_err_to_name(err));
         bench_cam_resume_after_ota();
+        bench_log_suspend(false);
         s_ota_busy = false;
         return send_error(req, "500 Internal Server Error", "ota begin failed");
     }
@@ -287,6 +291,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
             (void)esp_ota_abort(handle);
         }
         bench_cam_resume_after_ota();
+        bench_log_suspend(false);
         s_ota_busy = false;
         return send_error(req, "500 Internal Server Error", fail_msg);
     }
@@ -299,6 +304,10 @@ static esp_err_t handle_upload(httpd_req_t *req)
     }
     ESP_LOGI(TAG, "ota success: %lu bytes -> %s (%s), restarting",
              (unsigned long)received, part_name(part), new_version);
+    /* 升级写入已结束，恢复日志落盘并把升级结果刷进 storage；否则停机前的
+     * 这段日志只留在 RAM 里，重启就没了。 */
+    bench_log_suspend(false);
+    bench_log_flush_now();
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
     return ESP_OK;
@@ -335,6 +344,7 @@ static esp_err_t handle_rollback(httpd_req_t *req)
         ESP_LOGW(TAG, "rollback response failed (%s), restart anyway", esp_err_to_name(e));
     }
     ESP_LOGI(TAG, "rollback -> %s (%s), restarting", part_name(other), version);
+    bench_log_flush_now(); /* 回退也会重启，别把这次操作的日志丢在 RAM 里 */
     vTaskDelay(pdMS_TO_TICKS(2000));
     esp_restart();
     return ESP_OK;

@@ -12,6 +12,7 @@
 #include "bench_cam.h"
 #include "bench_cam_stream.h"
 #include "bench_http_server.h"
+#include "bench_log.h"
 #include "bench_ota.h"
 #include "config_store.h"
 #include "wheel_config.h"
@@ -474,6 +475,12 @@ static esp_err_t ws_handler(httpd_req_t *req)
             if (cJSON_IsBool(ja)) {
                 bench_cam_set_preview(cJSON_IsTrue(ja));
             }
+        } else if (strcmp(jtype->valuestring, "log_clock") == 0) {
+            /* 浏览器对时：设备无 NTP，控制台页面连上即补墙钟 */
+            cJSON *jts = cJSON_GetObjectItemCaseSensitive(root, "ts");
+            if (cJSON_IsNumber(jts)) {
+                bench_log_clock_sync((int64_t)jts->valuedouble);
+            }
         } else if (strcmp(jtype->valuestring, "get_cfg") == 0) {
             /* cfg 由遥测帧携带，无需专门回包 */
         }
@@ -547,8 +554,9 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = WHEEL_HTTPD_STACK;
     cfg.core_id = WHEEL_HTTPD_CORE;
-    /* 默认只有 8 个 URI 槽位：页面 4 + 相机 2 + OTA 3 = 9，不扩会注册失败。 */
-    cfg.max_uri_handlers = 12;
+    /* 默认只有 8 个 URI 槽位：页面 4 + 相机 2 + OTA 3 + 日志 3 = 12，
+     * 扩到 16 留余量（CLAUDE.md：注册失败会启动即 abort）。 */
+    cfg.max_uri_handlers = 16;
     /* 4 个 WS + 1 个 MJPEG + 页面/快照/临时连接；默认 7 在满员时会把
      * 新连接挤掉，lwIP 侧已经给了 16 个 socket。 */
     cfg.max_open_sockets = 10;
@@ -588,6 +596,9 @@ esp_err_t bench_http_server_start(const bench_server_ctx_t *ctx)
 
     /* OTA 端点：上传在 httpd 任务里同步执行，不新增任务。 */
     ESP_RETURN_ON_ERROR(bench_ota_start(hd), TAG, "ota endpoints");
+
+    /* 日志端点：live/list/file（bench_log 钩子在 app_main 里已装好）。 */
+    ESP_RETURN_ON_ERROR(bench_log_start(hd), TAG, "log endpoints");
 
     ESP_LOGI(TAG, "httpd up; page http://%s/", WHEEL_AP_IP);
     return ESP_OK;
