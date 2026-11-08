@@ -35,10 +35,13 @@ void sim_source_step(sim_source_t *src, uint32_t window_ms)
 
         if (emit > 0) {
             /* 与真实 ISR 对齐：首次 emit 只设基准不产间隔（第一个沿无前序）。
-             * 第二次起 span = 跨窗口跨度，低速时如实反映真实周期。 */
+             * 第二次起 span = 跨窗口跨度，低速时如实反映真实周期。
+             * 附加 ±3µs 确定性纹波：真实电机存在微小转速纹波，逐位相同的
+             * 间隔会让采集器的"首样本挂起等不同值"永远等不到提升（恒速
+             * 模拟时读数无法出现）；µs 级抖动对策略层无影响。 */
             if (src->has_pulse[ch]) {
                 uint32_t span = src->vtime_us - src->last_pulse_vtime[ch];
-                src->last_period_us[ch] = span / emit;
+                src->last_period_us[ch] = span / emit + (src->counter[ch] & 3u);
             }
             src->last_pulse_vtime[ch] = src->vtime_us;
             src->has_pulse[ch] = true;

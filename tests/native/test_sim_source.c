@@ -161,11 +161,11 @@ static void test_period_reflects_cross_window_span(void)
     /* 第 20 窗口首次 emit，只设基准，period 仍为 0 */
     TEST_ASSERT_EQUAL_UINT32(1, sim_source_counter(&sim, 0));
     TEST_ASSERT_EQUAL_UINT32(0, sim_source_period_us(&sim, 0));
-    /* 再跑 20 窗口到第二次 emit，span = 20×50ms = 1000000us */
+    /* 再跑 20 窗口到第二次 emit，span = 20×50ms = 1000000us（±3µs 纹波） */
     for (int i = 0; i < 20; i++) {
         sim_source_step(&sim, 50);
     }
-    TEST_ASSERT_EQUAL_UINT32(1000000u, sim_source_period_us(&sim, 0));
+    TEST_ASSERT_UINT_WITHIN(3u, 1000000u, sim_source_period_us(&sim, 0));
 }
 
 /* 9. 高速 1200 RPM：每窗口 1 脉冲。首次只设基准，第二次 emit 间隔 = 50ms → 20Hz */
@@ -176,7 +176,7 @@ static void test_period_high_speed(void)
     sim_source_step(&sim, 50); /* 首次 emit，只设基准 */
     TEST_ASSERT_EQUAL_UINT32(0, sim_source_period_us(&sim, 0));
     sim_source_step(&sim, 50); /* 第二次 emit，span = 50ms */
-    TEST_ASSERT_EQUAL_UINT32(50000u, sim_source_period_us(&sim, 0));
+    TEST_ASSERT_UINT_WITHIN(3u, 50000u, sim_source_period_us(&sim, 0));
 }
 
 /* 10. 停转过期：建立间隔后停转，超过 1.5×周期后 period 返回 0 */
@@ -186,12 +186,12 @@ static void test_period_expires_after_stop(void)
     sim_source_set_target_rpm(&sim, 0, 1200.0f); /* 20Hz, 间隔 50ms */
     sim_source_step(&sim, 50); /* 首次 emit，只设基准 */
     sim_source_step(&sim, 50); /* 第二次 emit，period=50000 */
-    TEST_ASSERT_EQUAL_UINT32(50000u, sim_source_period_us(&sim, 0));
+    TEST_ASSERT_UINT_WITHIN(3u, 50000u, sim_source_period_us(&sim, 0));
     /* 停转：target=0，继续 step 不 emit，since 持续增长 */
     sim_source_set_target_rpm(&sim, 0, 0.0f);
     /* 1.5×50000=75000us = 1.5 窗口；2 个窗口后 since=100000 > 75000 → 过期 */
     sim_source_step(&sim, 50); /* since=50000，未过期 */
-    TEST_ASSERT_EQUAL_UINT32(50000u, sim_source_period_us(&sim, 0));
+    TEST_ASSERT_UINT_WITHIN(3u, 50000u, sim_source_period_us(&sim, 0));
     sim_source_step(&sim, 50); /* since=100000 > 75000，过期 */
     TEST_ASSERT_EQUAL_UINT32(0, sim_source_period_us(&sim, 0));
 }

@@ -28,6 +28,7 @@
 static void rollback_baseline_clear(wheel_chan_state_t *st)
 {
     st->prev_valid_interval_us = 0;
+    st->last_seen_interval_us = 0;
     st->math_snapshot = (wsmath_state_t){0};
 }
 
@@ -38,6 +39,12 @@ static void rollback_baseline_clear(wheel_chan_state_t *st)
 static void pending_expire_if_needed(wheel_chan_state_t *st, uint32_t now_ms)
 {
     if (st->pending_interval_us == 0) {
+        return;
+    }
+    if (st->last_valid_interval_us == 0) {
+        /* 无基准首样本挂起（见 sample_period 末尾）：它不是"可疑短段"，
+         * 而是在等第二个间隔来提升基准，没有参照可算超时，不做超时丢弃；
+         * 轮子静止由 sample 里的 IDLE_TIMEOUT 兜底清理。 */
         return;
     }
     const uint64_t timeout_ms = (uint64_t)st->last_valid_interval_us *
@@ -121,9 +128,31 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
      * 这里兜住"长时间无新间隔后又来一个"的情况，sample 里兜住纯停转。 */
     pending_expire_if_needed(st, now_ms);
 
+    /* 重复轮询去重：真实/模拟源在两次边沿之间每个采样窗口（50ms）重复
+     * 返回同一间隔值，它是同一事件的重复上报，不是新脉冲。若放行走上报
+     * 路径，会把 math_snapshot/prev_valid_interval_us 覆写成 last 自身——
+     * 长段回滚的"比上上段短 10%"判定从此永不成立，相机假脉冲切出的长段
+     * 台阶无法撤销（现象：开摄像头后 RPM 周期性跳涨、可疑计数同步 +1）。
+     * 重复值不产生新事件，但要按 last_valid 继续推进 EMA：保持修复前
+     * "每窗口收敛一步"的速度，否则首样本直采到垃圾短值后只能等真实边沿
+     * 每周期走一步，要 3~5s 才收敛回正常读数。参照用 last_valid 而非重复
+     * 值本身——合并/回滚后 last_seen 存的是切分段值，按它推进会重新引入
+     * 分段台阶。快照与 prev 不得触碰（回滚参照完整性是本次去重的目的）。 */
+    if (st->pending_interval_us == 0 && interval_us == st->last_seen_interval_us) {
+        st->math.last_pulse_ms = now_ms;
+        if (st->last_valid_interval_us != 0) {
+            (void)wsmath_update_period(&st->math, st->last_valid_interval_us,
+                                       cfg->magnets, cfg->wheel_diam_mm,
+                                       cfg->alpha, now_ms);
+        }
+        return ESP_OK;
+    }
+    st->last_seen_interval_us = interval_us;
+
     st->trigger = true; /* 有间隔即表示本窗口检测到完整脉冲周期 */
 
     uint32_t report_us = interval_us;
+    bool consumed_by_merge = false;
 
     if (st->pending_interval_us != 0) {
         /* 真实源/模拟源每 50ms 重复返回最近一次间隔：值没变就是同一事件
@@ -131,19 +160,30 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
         if (interval_us == st->pending_interval_us) {
             return ESP_OK;
         }
-        /* 下一个不同间隔到来：与挂起片段相加，落回上次有效间隔 ±25% 就
-         * 确认是假脉冲切分，合并成一个真实周期上报。 */
-        const uint64_t merged = (uint64_t)st->pending_interval_us + interval_us;
-        const uint64_t last = st->last_valid_interval_us;
-        st->pending_interval_us = 0;
-        if (merged <= UINT32_MAX &&
-            merged * 100u > last * (100u - SPLIT_MERGE_TOL_PCT) &&
-            merged * 100u < last * (100u + SPLIT_MERGE_TOL_PCT)) {
-            report_us = (uint32_t)merged;
+        if (st->last_valid_interval_us == 0) {
+            /* 无基准配对：挂起中的是"首样本"（启动/静止恢复后的第一个
+             * 间隔）。它可能是假脉冲切出的短段——直采曾让读数一闪几百
+             * RPM。这里静默把它提升为基准：不上报、不进 EMA、不计可疑，
+             * 当前间隔随后按正常流程判定。 */
+            st->last_valid_interval_us = st->pending_interval_us;
+            st->pending_interval_us = 0;
+        } else {
+            /* 下一个不同间隔到来：与挂起片段相加，落回上次有效间隔 ±25% 就
+             * 确认是假脉冲切分，合并成一个真实周期上报。 */
+            const uint64_t merged = (uint64_t)st->pending_interval_us + interval_us;
+            const uint64_t last = st->last_valid_interval_us;
+            st->pending_interval_us = 0;
+            consumed_by_merge = true; /* 合并成败都不再对当前间隔做短段判定 */
+            if (merged <= UINT32_MAX &&
+                merged * 100u > last * (100u - SPLIT_MERGE_TOL_PCT) &&
+                merged * 100u < last * (100u + SPLIT_MERGE_TOL_PCT)) {
+                report_us = (uint32_t)merged;
+            }
+            /* 合并不成立：挂起值丢弃，当前间隔按正常值上报（下面统一走数学层） */
         }
-        /* 合并不成立：挂起值丢弃，当前间隔按正常值上报（下面统一走数学层） */
-    } else if (st->last_valid_interval_us != 0 &&
-               (uint64_t)interval_us * SPLIT_HOLD_DEN < st->last_valid_interval_us) {
+    }
+    if (!consumed_by_merge && st->last_valid_interval_us != 0 &&
+        (uint64_t)interval_us * SPLIT_HOLD_DEN < st->last_valid_interval_us) {
         /* 长段回滚：假脉冲先切出长段时，长段已经被当成真实周期上报过。
          * 等短段到来，若长段明显短于上上段（>10%，真实轮速不会一步突变
          * 这么多）、且两段之和回落到上上段 ±25% 内，就撤销长段那次上报，
@@ -163,11 +203,21 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
                                         cfg->wheel_diam_mm, cfg->alpha, now_ms);
         }
 
-        /* 回滚不成立（首样本无参照或数值对不上）：按原逻辑挂起，
+        /* 回滚不成立（无上上段参照或数值对不上）：按原逻辑挂起，
          * 等下一个间隔判断能否合并 */
         st->pending_interval_us = interval_us;
         st->pending_since_ms = now_ms;
         st->suspect_count++;
+        return ESP_OK;
+    }
+
+    if (st->last_valid_interval_us == 0) {
+        /* 首个间隔不可信：使能瞬间 ISR 锁存的很可能正是假脉冲切出的短段，
+         * 直采曾让读数一闪几百 RPM。挂起等第二个间隔——不同值到来时上面
+         * 的无基准配对会静默提升基准；轮子静止则由 sample 的 IDLE_TIMEOUT
+         * 兜底清理。此路径不上报、不显示、不计可疑。 */
+        st->pending_interval_us = interval_us;
+        st->pending_since_ms = now_ms;
         return ESP_OK;
     }
 

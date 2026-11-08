@@ -46,6 +46,11 @@ typedef struct {
     wsmath_state_t math_snapshot;    /* 上次正常上报前的 math 副本，回滚时恢复 */
     uint32_t pending_interval_us;    /* 挂起中的可疑短间隔；0=无挂起 */
     uint32_t pending_since_ms;       /* 挂起时刻，用于超时丢弃 */
+    uint32_t last_seen_interval_us;  /* 最近一次见到的间隔值：正常路径重复轮询
+                                        去重用——源在两次边沿间每窗口重复返回
+                                        同一值，放行会覆写回滚参照（prev/快照）
+                                        导致长段回滚永不触发；0=尚未见过，
+                                        随回滚基准一起清零 */
     uint32_t suspect_count;          /* 可疑间隔累计次数（诊断遥测） */
 } wheel_chan_state_t;
 
@@ -71,7 +76,14 @@ void wheel_chan_reset_baseline(wheel_chan_state_t *st, uint16_t current_counter)
  * 间隔为 0 返回 ESP_ERR_INVALID_ARG 且状态不变。
  *
  * 间隔切分合并（防相机时钟耦合产生的假脉冲）：
- * - 首样本（last_valid_interval_us==0）直接采纳，不挂起；
+ * - 重复轮询去重：源在两次边沿之间每窗口重复返回同一间隔，正常路径仅首个
+ *   见到的值参与状态机；重复值只保鲜 last_pulse_ms 并按 last_valid 继续推进
+ *   EMA（维持每窗口一步的收敛速度），不产生新事件、不覆写回滚参照；
+ *   挂起值的重复同样不上报；
+ * - 无基准首样本不直采：启动/静止恢复后的第一个间隔不可信（使能瞬间
+ *   ISR 锁存的可能是假脉冲切出的短段，直采曾让读数一闪几百 RPM），先
+ *   挂起（不计可疑、不上报）；第二个不同间隔到来时静默提升为基准，再
+ *   按正常流程判定。恒定间隔的模拟源由第二次不同值或停转兜底；
  * - 新间隔短于上次有效间隔的一半 → 先做长段回滚判定，再挂起不报；
  *   suspect_count++，同一间隔的重复轮询不算新事件；
  * - 长段回滚：上一段比上上段短 10% 以上、且上一段与当前短段之和落在
@@ -81,7 +93,7 @@ void wheel_chan_reset_baseline(wheel_chan_state_t *st, uint16_t current_counter)
  * - 合并不成立 → 丢弃挂起，当前间隔正常上报；
  * - 挂起超过上次有效间隔的 1.5 倍仍无新事件 → 丢弃挂起并清空合并基准，
  *   之后首个间隔按首样本直采（停转由 IDLE_TIMEOUT_LONG_MS 归零）。
- * - 挂起超时、静止归零、换源重置同时清空回滚参照（prev 与 math 快照）。
+ * - 挂起超时、静止归零、换源重置同时清空回滚参照（last_seen、prev 与 math 快照）。
  */
 esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
                                    uint32_t interval_us, uint32_t now_ms);
