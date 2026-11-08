@@ -7,7 +7,6 @@ tests/native/build/
 __pycache__/
 *.pyc
 .cache/
-.claude/agents/
 
 # 本地方案/计划文档，只在自己机器上留着，不入库
 docs/
