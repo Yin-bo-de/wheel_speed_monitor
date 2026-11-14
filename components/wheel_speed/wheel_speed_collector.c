@@ -158,6 +158,12 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
         /* 真实源/模拟源每 50ms 重复返回最近一次间隔：值没变就是同一事件
          * 的重复轮询，既不算合并搭档，也不能重新挂起。 */
         if (interval_us == st->pending_interval_us) {
+            /* 同值重复轮询仍意味着传感器新鲜期内有过真实脉冲（轮子在转）：
+             * 与收敛态的去重路径一致保鲜 last_pulse_ms。否则低速
+             * （周期 > 静止超时 2s）下挂起态在两个脉冲之间必被静止兜底
+             * 清空，配对脉冲永远凑不齐，停转恢复后 RPM 恒为 0
+             * （实测：差速锁捏停一轮松手后读数不恢复）。 */
+            st->math.last_pulse_ms = now_ms;
             return ESP_OK;
         }
         if (st->last_valid_interval_us == 0) {

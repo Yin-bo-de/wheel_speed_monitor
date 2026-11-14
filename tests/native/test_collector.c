@@ -361,7 +361,8 @@ static void test_first_sample_held_pending(void)
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
 }
 
-/* 22. 挂起期间同一间隔被采样任务重复轮询：不重复计数、不上报；
+/* 22. 挂起期间同一间隔被采样任务重复轮询：不重新挂起、不配对、不新增可疑、
+ * 不上报（EMA 不动），只保鲜 last_pulse_ms（修复后语义，与收敛态去重一致）；
  * 真搭档到来时仍能合并（真实源每 50ms 都会重读同一个间隔） */
 static void test_pending_repeat_poll_ignored(void)
 {
@@ -370,7 +371,9 @@ static void test_pending_repeat_poll_ignored(void)
     TEST_ASSERT_FALSE(feed_period(1000000u)); /* 首样本挂起（不直采） */
     TEST_ASSERT_FALSE(feed_period(150000u)); /* 1000 静默提升基准；150 挂起 */
     for (int i = 0; i < 5; i++) {
-        TEST_ASSERT_FALSE(feed_period(150000u));
+        TEST_ASSERT_TRUE(feed_period(150000u)); /* 只保鲜，不当新事件 */
+        TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
+        TEST_ASSERT_EQUAL_UINT32(150000u, st.pending_interval_us);
     }
     TEST_ASSERT_EQUAL_UINT32(1, st.suspect_count);
     TEST_ASSERT_TRUE(feed_period(850000u));
@@ -531,6 +534,64 @@ static void test_garbage_first_sample_not_displayed(void)
     TEST_ASSERT_EQUAL_UINT32(1000000u, st.last_valid_interval_us);
 }
 
+/* 30.【回归】低速停转恢复（实测问题：差速锁捏停一轮松手后 RPM 恒 0）。
+ * 1 磁铁、真实周期 2.5s（24 RPM），脉冲间隔超过 2s 静止归零线。
+ * 复刻固件真实节拍：脉冲沿时刻计数 +1、传感器层返回与上一有效沿的间隔，
+ * 其余 50ms 拍重复读到同一间隔（新鲜期 1.5×间隔）。捏轮 10s 后松开：
+ * 首个沿的间隔是"停转间隙+周期"的垃圾值 10s。
+ * 修复前：挂起态在两个脉冲之间（2.5s > 2s）必被静止兜底清空，
+ * 配对脉冲永远凑不齐，RPM 恒为 0（第 3 个沿断言失败）；
+ * 修复后：第 3 个沿（t=5s）恢复显示 24 RPM，真停转在新鲜期+2s 内归零。 */
+static void tick_ms(uint32_t t_ms, uint32_t interval_us, uint16_t counter)
+{
+    /* interval_us 为 0：传感器层新鲜期已过（get_period 返回 0），
+     * 固件该拍只走计数路径 */
+    if (interval_us > 0) {
+        (void)wheel_chan_sample_period(&st, &cfg, interval_us, t_ms);
+    }
+    (void)wheel_chan_sample(&st, &cfg, counter, t_ms);
+}
+
+static void test_low_rpm_stall_recovery(void)
+{
+    fresh();
+    uint16_t counter = 0;
+    const uint32_t T_MS = 2500;
+    /* 逐沿间隔：首沿为含停转间隙的垃圾值，其后为真实周期（带 µs 抖动，
+     * 逐位相等会被当重复轮询而无法配对） */
+    const uint32_t edges_us[6] = {
+        10000000u, 2500000u, 2500100u, 2499900u, 2500050u, 2499950u,
+    };
+
+    for (uint32_t e = 0; e < 6; e++) {
+        counter++;
+        const uint32_t t_edge = e * T_MS;
+        tick_ms(t_edge, edges_us[e], counter);
+        if (e == 2) {
+            /* 修复后：第 3 个沿已上报，恢复 24 RPM（修复前此处为 0） */
+            TEST_ASSERT_FLOAT_WITHIN(0.5f, 24.0f, st.math.rpm_ema);
+        }
+        for (uint32_t t = t_edge + 50; t < t_edge + T_MS; t += 50) {
+            tick_ms(t, edges_us[e], counter);
+        }
+    }
+    /* 连续运转 6 个沿（15s）后仍稳定（修复前死锁：恒 0） */
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 24.0f, st.math.rpm_ema);
+
+    /* t=12500 最后一个沿后停转：新鲜期 1.5×2.5s=3.75s 内重复轮询保鲜，
+     * 不被 2s 静止线误清 */
+    for (uint32_t t = 15000; t <= 16250; t += 50) {
+        tick_ms(t, edges_us[5], counter);
+    }
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 24.0f, st.math.rpm_ema);
+    /* 新鲜期过后 get_period 返回 0：只剩计数路径，2s 静止兜底归零 */
+    for (uint32_t t = 16300; t <= 18500; t += 50) {
+        tick_ms(t, 0, counter);
+    }
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, st.math.rpm_ema);
+    TEST_ASSERT_FALSE(st.math.has_sample);
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_normal_increment, "test_normal_increment", __LINE__);
     UnityDefaultTestRun(test_wraparound, "test_wraparound", __LINE__);
@@ -562,4 +623,5 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_rollback_survives_repeat_polls, "test_rollback_survives_repeat_polls", __LINE__);
     UnityDefaultTestRun(test_consumed_partner_repeat_poll_ignored, "test_consumed_partner_repeat_poll_ignored", __LINE__);
     UnityDefaultTestRun(test_garbage_first_sample_not_displayed, "test_garbage_first_sample_not_displayed", __LINE__);
+    UnityDefaultTestRun(test_low_rpm_stall_recovery, "test_low_rpm_stall_recovery", __LINE__);
 )
