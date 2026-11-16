@@ -200,6 +200,10 @@ static void strat_cfg_build(const cfg_params_t *cfg, strategy_config_t *out)
     out->lock_hold_ms = cfg->lock_hold_ms;
     out->lock_hold_max_ms = cfg->lock_hold_max_ms;
     out->probe_window_ms = cfg->probe_window_ms;
+    out->lock_max_speed_rpm = cfg->lock_max_speed_rpm;
+    out->lock_max_delta_rpm = cfg->lock_max_delta_rpm;
+    out->lock_sync_stable_ms = cfg->lock_sync_stable_ms;
+    out->manual_gate_enable = cfg->manual_gate_enable;
 }
 
 /* 按配置在模拟模型与 LEDC 之间选执行器。
@@ -547,7 +551,8 @@ void app_main(void)
     /* 舵机配置值得单独打一行：升级后这里能直接看出新字段是否落到了预期值
      * （v1 blob 迁移后新字段取默认，一眼可辨） */
     ESP_LOGI(TAG, "servo: sim=%d mode=%lu en=[%d,%d] 解锁/锁定=[%lu/%lu,%lu/%lu] "
-                  "手动=[%lu,%lu] engage=%.2f minrpm=%.1f confirm=%lu hold=%lu/%lu probe=%lu speed=%lu",
+                  "手动=[%lu,%lu] engage=%.2f minrpm=%.1f confirm=%lu hold=%lu/%lu probe=%lu speed=%lu "
+                  "gate=%.0f/%.0f/%lu gatem=%d",
              cfg.servo_sim, (unsigned long)cfg.servo_mode,
              cfg.servo_en[0], cfg.servo_en[1],
              (unsigned long)cfg.servo_unlock_us[0], (unsigned long)cfg.servo_lock_us[0],
@@ -557,7 +562,9 @@ void app_main(void)
              (unsigned long)cfg.slip_confirm_ms,
              (unsigned long)cfg.lock_hold_ms, (unsigned long)cfg.lock_hold_max_ms,
              (unsigned long)cfg.probe_window_ms,
-             (unsigned long)cfg.servo_sim_speed_us_s);
+             (unsigned long)cfg.servo_sim_speed_us_s,
+             (double)cfg.lock_max_speed_rpm, (double)cfg.lock_max_delta_rpm,
+             (unsigned long)cfg.lock_sync_stable_ms, cfg.manual_gate_enable);
     ESP_LOGI(TAG, "rc: sim=%d 模式/前/后=[%lu,%lu,%lu] 超时=%dms 引脚=%d/%d/%d",
              cfg.rc_sim, (unsigned long)cfg.rc_sim_us[0], (unsigned long)cfg.rc_sim_us[1],
              (unsigned long)cfg.rc_sim_us[2], WHEEL_RC_TIMEOUT_MS,
