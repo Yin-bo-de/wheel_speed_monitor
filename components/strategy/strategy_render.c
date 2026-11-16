@@ -10,6 +10,8 @@ const char *strategy_phase_name(strategy_phase_t phase)
         return "locked";
     case STRATEGY_PHASE_PROBE:
         return "probe";
+    case STRATEGY_PHASE_PENDING_SYNC:
+        return "pending_sync";
     case STRATEGY_PHASE_IDLE:
     default:
         return "idle";
@@ -60,7 +62,8 @@ esp_err_t servo_render_block(const servo_render_state_t *rs,
                     "\"manual_us\":[%lu,%lu],\"mode\":\"%s\","
                     "\"engage\":%.2f,\"min_rpm\":%.1f,\"confirm_ms\":%lu,"
                     "\"hold_ms\":%lu,\"hold_max_ms\":%lu,"
-                    "\"probe_ms\":%lu,\"sim_speed\":%lu}}",
+                    "\"probe_ms\":%lu,\"gate_speed\":%.1f,\"gate_delta\":%.1f,"
+                    "\"gate_stable_ms\":%lu,\"manual_gate\":%s,\"sim_speed\":%lu}}",
                     rs->sim ? "true" : "false",
                     (unsigned long)cfg->unlock_us[0], (unsigned long)cfg->unlock_us[1],
                     (unsigned long)cfg->lock_us[0], (unsigned long)cfg->lock_us[1],
@@ -68,7 +71,11 @@ esp_err_t servo_render_block(const servo_render_state_t *rs,
                     (double)cfg->slip_engage_ratio, (double)cfg->slip_min_rpm,
                     (unsigned long)cfg->slip_confirm_ms,
                     (unsigned long)cfg->lock_hold_ms, (unsigned long)cfg->lock_hold_max_ms,
-                    (unsigned long)cfg->probe_window_ms, (unsigned long)rs->sim_speed_us_s);
+                    (unsigned long)cfg->probe_window_ms,
+                    (double)cfg->lock_max_speed_rpm, (double)cfg->lock_max_delta_rpm,
+                    (unsigned long)cfg->lock_sync_stable_ms,
+                    cfg->manual_gate_enable ? "true" : "false",
+                    (unsigned long)rs->sim_speed_us_s);
 
 #undef RENDER_SNPRINTF
 
