@@ -384,7 +384,7 @@ static void test_unpack_rejects_bad_len_and_version(void)
 
     blob[0] = 0;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
-    blob[0] = 7; /* 比当前版本更新 → 认不出来，拒绝 */
+    blob[0] = 8; /* 比当前版本（v7）更新 → 认不出来，拒绝 */
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
 
     /* v1 版本号但只有 31 字节：残缺，拒绝 */
@@ -417,6 +417,11 @@ static void test_unpack_rejects_bad_len_and_version(void)
     blob[0] = 6;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 95, &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 96, &cfg));
+
+    /* v7：111 字节残缺拒绝，112 字节照收 */
+    blob[0] = 7;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, 111, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, 112, &cfg));
 
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(NULL, sizeof(blob), &cfg));
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_unpack(blob, sizeof(blob), NULL));
@@ -743,6 +748,132 @@ static void test_v5_blob_migrates_to_default_confirm(void)
     TEST_ASSERT_EQUAL_INT(def.slip_confirm_ms, cfg.slip_confirm_ms);
 }
 
+/* 23. 打牙防护闸门默认值：车速 60、速差 40、稳定期 300ms、手动闸门开 */
+static void test_gate_defaults(void)
+{
+    cfg_params_t cfg;
+    cfg_params_default(&cfg);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, cfg.lock_max_speed_rpm);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 40.0f, cfg.lock_max_delta_rpm);
+    TEST_ASSERT_EQUAL_INT(300, cfg.lock_sync_stable_ms);
+    TEST_ASSERT_TRUE(cfg.manual_gate_enable);
+}
+
+/* 24. 闸门字段边界：两闸门 0~2000（0 = 永不满足，调试位），稳定期 0~5000（0 = 立即） */
+static void test_gate_bounds(void)
+{
+    cfg_params_t cfg;
+    cfg_params_default(&cfg);
+
+    cfg.lock_max_speed_rpm = 0.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "lock_max_speed_rpm"));
+    cfg.lock_max_speed_rpm = 2000.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "lock_max_speed_rpm"));
+    cfg.lock_max_speed_rpm = -0.5f;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "lock_max_speed_rpm"));
+    cfg.lock_max_speed_rpm = 2000.5f;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "lock_max_speed_rpm"));
+
+    cfg.lock_max_delta_rpm = 0.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "lock_max_delta_rpm"));
+    cfg.lock_max_delta_rpm = 2000.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "lock_max_delta_rpm"));
+    cfg.lock_max_delta_rpm = -1.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "lock_max_delta_rpm"));
+    cfg.lock_max_delta_rpm = 2001.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "lock_max_delta_rpm"));
+
+    cfg.lock_sync_stable_ms = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "lock_sync_stable_ms"));
+    cfg.lock_sync_stable_ms = 5000;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "lock_sync_stable_ms"));
+    cfg.lock_sync_stable_ms = 5001;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "lock_sync_stable_ms"));
+}
+
+/* 25. v7 往返：闸门三字段与手动开关全量保真，前面各段字段不串位 */
+static void test_pack_unpack_v7_roundtrip(void)
+{
+    cfg_params_t a, b;
+    cfg_params_default(&a);
+    a.lock_max_speed_rpm = 120.5f;
+    a.lock_max_delta_rpm = 35.0f;
+    a.lock_sync_stable_ms = 450;
+    a.manual_gate_enable = false;
+    a.slip_confirm_ms = 2500;
+    a.servo_lock_us[1] = 900;
+
+    uint8_t blob[CFG_PARAMS_BLOB_SIZE];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_pack(&a, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL_INT(CFG_PARAMS_BLOB_VERSION, blob[0]);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(blob, sizeof(blob), &b));
+
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 120.5f, b.lock_max_speed_rpm);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 35.0f, b.lock_max_delta_rpm);
+    TEST_ASSERT_EQUAL_INT(450, b.lock_sync_stable_ms);
+    TEST_ASSERT_FALSE(b.manual_gate_enable);
+    TEST_ASSERT_EQUAL_INT(2500, b.slip_confirm_ms);
+    TEST_ASSERT_EQUAL_INT(900, b.servo_lock_us[1]);
+}
+
+/* 按六期（v6）布局手工拼一条 96 字节 blob：尾部是确认期字段，没有闸门段。
+ * 同样不复用打包代码，模拟旧固件写下的真实字节流。 */
+static void build_v6_blob(uint8_t buf[96])
+{
+    memset(buf, 0, 96);
+    buf[0] = 6;     /* v6 版本号 */
+    buf[32] = 1;    /* servo_sim */
+    buf[33] = 0x03; /* 两轴使能 */
+    buf[34] = CFG_SERVO_MODE_AUTO;
+    uint16_t unlock[2] = {1500, 1500};
+    uint16_t lock[2] = {2000, 2000};
+    uint16_t manual[2] = {1500, 1500};
+    memcpy(buf + 35, unlock, 4);
+    memcpy(buf + 39, lock, 4);
+    memcpy(buf + 43, manual, 4);
+    float engage = 0.30f, min_rpm = 10.0f;
+    memcpy(buf + 47, &engage, 4);
+    memcpy(buf + 51, &min_rpm, 4);
+    uint32_t hold = 3000, hold_max = 30000, probe = 2000, speed = 3000;
+    memcpy(buf + 55, &hold, 4);
+    memcpy(buf + 59, &hold_max, 4);
+    memcpy(buf + 63, &probe, 4);
+    memcpy(buf + 67, &speed, 4);
+    buf[76] = 1; /* rc_sim */
+    uint16_t sim[3] = {1000, 1600, 1400};
+    memcpy(buf + 77, sim, 6);
+    buf[84] = CFG_CAM_POLICY_ALWAYS;
+    buf[85] = CFG_CAM_RES_SVGA;
+    buf[86] = 7;
+    buf[87] = 22;
+    uint32_t overlay = CFG_CAM_OVERLAY_WHEELS | CFG_CAM_OVERLAY_SYS;
+    memcpy(buf + 88, &overlay, 4);
+    uint32_t confirm = 2500;
+    memcpy(buf + 92, &confirm, 4);
+}
+
+/* 26. v6 blob 迁移：确认期原样解出，闸门三字段与手动开关取默认（升级不丢旧配置） */
+static void test_v6_blob_migrates_to_gate_defaults(void)
+{
+    uint8_t v6[96];
+    build_v6_blob(v6);
+
+    cfg_params_t cfg;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_unpack(v6, sizeof(v6), &cfg));
+
+    TEST_ASSERT_EQUAL_INT(2500, cfg.slip_confirm_ms);
+    TEST_ASSERT_EQUAL_INT(2000, cfg.servo_lock_us[0]);
+    TEST_ASSERT_EQUAL_INT(CFG_CAM_POLICY_ALWAYS, cfg.cam_policy);
+    TEST_ASSERT_EQUAL_INT(1400, cfg.rc_sim_us[2]);
+
+    cfg_params_t def;
+    cfg_params_default(&def);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, def.lock_max_speed_rpm, cfg.lock_max_speed_rpm);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, def.lock_max_delta_rpm, cfg.lock_max_delta_rpm);
+    TEST_ASSERT_EQUAL_INT(def.lock_sync_stable_ms, cfg.lock_sync_stable_ms);
+    TEST_ASSERT_EQUAL_INT(def.manual_gate_enable, cfg.manual_gate_enable);
+}
+
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_defaults, "test_defaults", __LINE__);
     UnityDefaultTestRun(test_bounds, "test_bounds", __LINE__);
@@ -765,5 +896,9 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_v4_blob_migrates_to_camera_defaults, "test_v4_blob_migrates_to_camera_defaults", __LINE__);
     UnityDefaultTestRun(test_v5_blob_migrates_to_default_confirm, "test_v5_blob_migrates_to_default_confirm", __LINE__);
     UnityDefaultTestRun(test_unpack_rejects_bad_len_and_version, "test_unpack_rejects_bad_len_and_version", __LINE__);
+    UnityDefaultTestRun(test_gate_defaults, "test_gate_defaults", __LINE__);
+    UnityDefaultTestRun(test_gate_bounds, "test_gate_bounds", __LINE__);
+    UnityDefaultTestRun(test_pack_unpack_v7_roundtrip, "test_pack_unpack_v7_roundtrip", __LINE__);
+    UnityDefaultTestRun(test_v6_blob_migrates_to_gate_defaults, "test_v6_blob_migrates_to_gate_defaults", __LINE__);
     UnityDefaultTestRun(test_pack_guards, "test_pack_guards", __LINE__);
 )

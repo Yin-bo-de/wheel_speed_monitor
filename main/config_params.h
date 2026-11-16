@@ -7,7 +7,9 @@
  * 参数；v3（76B）把舵机脉宽从"共享的 min/center/max + invert"换成"每通道的
  * 解锁/锁定两档"；v4（84B）在尾部追加遥控输入（模拟开关与三路模拟脉宽）；
  * v5（92B）在尾部追加摄像头策略、分辨率、画质、采集/发送帧率上限与叠加位图；
- * v6（96B）在尾部追加打滑确认期（首次判定打滑后需连续满足多久才上锁）。
+ * v6（96B）在尾部追加打滑确认期（首次判定打滑后需连续满足多久才上锁）；
+ * v7（112B）在尾部追加打牙防护双闸门（车速/速差阈值、同步稳定期）与手动
+ * 闸门开关；
  * 解包按首字节版本号分派——旧 blob 仍可解，缺失字段取默认值（v2 还要按旧
  * 语义换算，见 cfg_params_unpack），上层解出后回写最新版，升级不丢用户已设的配置。
  */
@@ -54,6 +56,14 @@ extern "C" {
 #define CFG_SIM_SPEED_MIN 100
 #define CFG_SIM_SPEED_MAX 20000
 
+/* 打牙防护双闸门：0 下限保留"永不满足"的调试位；上限对齐轮速量程 */
+#define CFG_LOCK_MAX_SPEED_MIN 0.0f
+#define CFG_LOCK_MAX_SPEED_MAX 2000.0f
+#define CFG_LOCK_MAX_DELTA_MIN 0.0f
+#define CFG_LOCK_MAX_DELTA_MAX 2000.0f
+/* 同步稳定期 0 = 窗口满足第一拍即锁（保留立即锁对照），上限 5s */
+#define CFG_LOCK_SYNC_STABLE_MAX_MS 5000
+
 /* 摄像头策略：off 永不初始化；on_demand 由第一个流/快照请求启动；always 调试常开。 */
 #define CFG_CAM_POLICY_OFF 0
 #define CFG_CAM_POLICY_ON_DEMAND 1
@@ -87,10 +97,12 @@ extern "C" {
  *   v5 段 84..91：cam_policy(1B) + cam_res(1B) + cam_quality(1B)
  *               + cam_fps_cap(1B) + overlay_mask(u32)
  *   v6 段 92..95：slip_confirm_ms(u32)
+ *   v7 段 96..111：lock_max_speed_rpm(float) + lock_max_delta_rpm(float)
+ *               + lock_sync_stable_ms(u32) + manual_gate_enable(1B) + 保留(3B)
  * v2 段（32..71）与 v3 段是同义不同形：v2 用共享的 min/center/max + invert
  * 位图描述脉宽，v3 换成每通道两档，因此长 4 字节、其余字段偏移整体后移。 */
-#define CFG_PARAMS_BLOB_VERSION 6
-#define CFG_PARAMS_BLOB_SIZE 96
+#define CFG_PARAMS_BLOB_VERSION 7
+#define CFG_PARAMS_BLOB_SIZE 112
 #define CFG_PARAMS_BLOB_VERSION_1 1
 #define CFG_PARAMS_BLOB_SIZE_V1 32
 #define CFG_PARAMS_BLOB_VERSION_2 2
@@ -101,6 +113,8 @@ extern "C" {
 #define CFG_PARAMS_BLOB_SIZE_V4 84
 #define CFG_PARAMS_BLOB_VERSION_5 5
 #define CFG_PARAMS_BLOB_SIZE_V5 92
+#define CFG_PARAMS_BLOB_VERSION_6 6
+#define CFG_PARAMS_BLOB_SIZE_V6 96
 
 typedef struct {
     uint32_t magnets;    /* 每转磁铁数 1-16 */
@@ -145,12 +159,19 @@ typedef struct {
 
     /* ---- v6：打滑确认 ---- */
     uint32_t slip_confirm_ms; /* 首次打滑后需连续满足多久才上锁；0=立即锁 */
+
+    /* ---- v7：打牙防护双闸门 ---- */
+    float lock_max_speed_rpm;   /* 车速闸门：慢轮低于此值才允许锁 */
+    float lock_max_delta_rpm;   /* 速差闸门：左右速差低于此值才允许锁 */
+    uint32_t lock_sync_stable_ms; /* 双闸门连续满足多久才落锁；0=立即 */
+    bool manual_gate_enable;    /* 手动模式锁止档命令同样过闸门 */
 } cfg_params_t;
 
 void cfg_params_default(cfg_params_t *cfg);
 
 /* 校验单字段；字段名与 JSON 命令一致（magnets、diam、alpha、en、sim、
  * sim_rpm、debounce，以及 v2 的舵机与锁定策略各字段、v6 的 slip_confirm_ms，
+ * 以及 v7 的 lock_max_speed_rpm / lock_max_delta_rpm / lock_sync_stable_ms，
  * 见上表）。
  * 未知字段返回 ESP_OK（命令层忽略）。
  * 跨字段约束（min<center<max、hold_max>=hold）随任一相关字段被写时一并检查，

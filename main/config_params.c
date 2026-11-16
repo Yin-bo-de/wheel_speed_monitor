@@ -33,6 +33,11 @@ void cfg_params_default(cfg_params_t *cfg)
     cfg->lock_hold_ms = 3000;
     cfg->lock_hold_max_ms = 30000;
     cfg->probe_window_ms = 2000;
+    /* 打牙防护起步值偏保守：宁可多等一拍也不打牙，标定见 docs 方案 */
+    cfg->lock_max_speed_rpm = 60.0f;
+    cfg->lock_max_delta_rpm = 40.0f;
+    cfg->lock_sync_stable_ms = 300;
+    cfg->manual_gate_enable = true;
     cfg->servo_sim_speed_us_s = 3000;
 
     cfg->rc_sim = false;
@@ -129,6 +134,20 @@ esp_err_t cfg_params_validate(const cfg_params_t *cfg, const char *field)
     } else if (strcmp(field, "slip_confirm_ms") == 0) {
         if (cfg->slip_confirm_ms > CFG_SLIP_CONFIRM_MAX_MS) {
             return ESP_ERR_INVALID_ARG; /* 0 合法：立即锁，保留旧行为 */
+        }
+    } else if (strcmp(field, "lock_max_speed_rpm") == 0) {
+        if (cfg->lock_max_speed_rpm < CFG_LOCK_MAX_SPEED_MIN ||
+            cfg->lock_max_speed_rpm > CFG_LOCK_MAX_SPEED_MAX) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "lock_max_delta_rpm") == 0) {
+        if (cfg->lock_max_delta_rpm < CFG_LOCK_MAX_DELTA_MIN ||
+            cfg->lock_max_delta_rpm > CFG_LOCK_MAX_DELTA_MAX) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "lock_sync_stable_ms") == 0) {
+        if (cfg->lock_sync_stable_ms > CFG_LOCK_SYNC_STABLE_MAX_MS) {
+            return ESP_ERR_INVALID_ARG; /* 0 合法：窗口满足第一拍即锁 */
         }
     } else if (strcmp(field, "servo_sim_speed_us_s") == 0) {
         if (cfg->servo_sim_speed_us_s < CFG_SIM_SPEED_MIN ||
@@ -365,6 +384,27 @@ static void unpack_v6_segment(const uint8_t *buf, cfg_params_t *out)
     memcpy(&out->slip_confirm_ms, buf + 92, 4);
 }
 
+/* ---- v7 段（96..111）：打牙防护双闸门 ----
+ * 追加在 v6 段之后，旧段偏移一个字节都不动：旧固件写的 blob 照常解出，
+ * 只补默认闸门值（车速 60/速差 40/稳定 300/手动闸门开），升级后不丢配置。 */
+
+static void pack_v7_segment(const cfg_params_t *cfg, uint8_t *buf)
+{
+    memcpy(buf + 96, &cfg->lock_max_speed_rpm, 4);
+    memcpy(buf + 100, &cfg->lock_max_delta_rpm, 4);
+    memcpy(buf + 104, &cfg->lock_sync_stable_ms, 4);
+    buf[108] = cfg->manual_gate_enable ? 1 : 0;
+    /* 109..111 保留 */
+}
+
+static void unpack_v7_segment(const uint8_t *buf, cfg_params_t *out)
+{
+    memcpy(&out->lock_max_speed_rpm, buf + 96, 4);
+    memcpy(&out->lock_max_delta_rpm, buf + 100, 4);
+    memcpy(&out->lock_sync_stable_ms, buf + 104, 4);
+    out->manual_gate_enable = buf[108] != 0;
+}
+
 esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
 {
     if (cfg == NULL || buf == NULL || len < CFG_PARAMS_BLOB_SIZE) {
@@ -376,6 +416,7 @@ esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
     pack_v4_segment(cfg, buf);
     pack_v5_segment(cfg, buf);
     pack_v6_segment(cfg, buf);
+    pack_v7_segment(cfg, buf);
     return ESP_OK;
 }
 
@@ -431,6 +472,17 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v5_segment(buf, out);
         return ESP_OK; /* 确认期保持默认 3000ms；上层随后回写 v6 */
     }
+    if (buf[0] == CFG_PARAMS_BLOB_VERSION_6) {
+        if (len < CFG_PARAMS_BLOB_SIZE_V6) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        unpack_v1_segment(buf, out);
+        unpack_v3_segment(buf, out);
+        unpack_v4_segment(buf, out);
+        unpack_v5_segment(buf, out);
+        unpack_v6_segment(buf, out);
+        return ESP_OK; /* 闸门字段保持默认；上层随后回写 v7 */
+    }
     if (buf[0] == CFG_PARAMS_BLOB_VERSION) {
         if (len < CFG_PARAMS_BLOB_SIZE) {
             return ESP_ERR_INVALID_ARG;
@@ -440,6 +492,7 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v4_segment(buf, out);
         unpack_v5_segment(buf, out);
         unpack_v6_segment(buf, out);
+        unpack_v7_segment(buf, out);
         return ESP_OK;
     }
     return ESP_ERR_INVALID_VERSION;
