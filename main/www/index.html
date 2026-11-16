@@ -51,6 +51,7 @@
   .badge.idle { background:#2a2a2a; color:#999; }
   .badge.locked { background:#4a1e1e; color:#ff7f7f; }
   .badge.probe { background:#17364a; color:#7fc8ff; }
+  .badge.pending_sync { background:#4a3d1e; color:#ffd77f; }
   .badge.manual { background:#332a4a; color:#b39ddb; }
   .servo-val { display:flex; flex-wrap:wrap; gap:6px 14px; font-size:12px; align-items:baseline; }
   .servo-val span { color:var(--dim); font-size:11px; }
@@ -308,6 +309,16 @@
     </div>
     <p class="hint">试探窗口要盖住舵机行程 + 轮速刷新延迟（低速时可达 1.3 秒）。调小了会在没真脱困时提前判成功。</p>
 
+    <h2 style="margin-top:14px">打牙防护 <span class="note">(双闸门 + 等待同步)</span></h2>
+    <div class="cfg-grid">
+      <div><label>车速闸门(转/分)</label><input id="sgatespeed" type="number" min="0" max="2000" step="1" value="60"></div>
+      <div><label>速差闸门(转/分)</label><input id="sgatedelta" type="number" min="0" max="2000" step="1" value="40"></div>
+      <div><label>同步稳定期(ms，0=立即)</label><input id="sgatestable" type="number" min="0" max="5000" value="300"></div>
+      <label style="grid-column:1/-1"><input type="checkbox" id="smanualgate" checked> 手动模式锁止档同样过闸门</label>
+    </div>
+    <p class="hint">打滑确认期满后先等同步窗口：慢轮低于车速闸门、左右速差低于速差闸门、连续满稳定期才落锁。
+      等待期间输出保持解锁档、页面显示「等待同步」——松油门让速差收敛即可自动落锁。</p>
+
     <div style="margin-top:10px"><button id="servo-apply">应用舵机配置</button></div>
   </div>
 
@@ -445,7 +456,7 @@ const RC_SRC_TEXT = {
   none: "捕获未起来（三路按无信号）",
 };
 const cols = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373"];
-const PHASE_TEXT = { idle: "已解锁", locked: "锁定中", probe: "试探中" };
+const PHASE_TEXT = { idle: "已解锁", locked: "锁定中", probe: "试探中", pending_sync: "等待同步" };
 /* 手动模式下判"在不在锁定位/解锁位"的容差：RC 脉宽有 ±几微秒抖动，
  * 舵机自身也有死区，按逐个微秒相等去判会来回跳 */
 const DETENT_TOL_US = 20;
@@ -697,10 +708,13 @@ function renderServo(sv) {
     $(`sdet${i}`).textContent = `解锁 ${unlock} / 锁定 ${lock}`;
     const badge = $("sphase" + i);
     if (sv.mode === "manual") {
-      /* 手动模式下状态机根本不跑、phase 恒为 idle，拿它显示"锁没锁"是撒谎：
-       * 遥控把脉宽推到锁定档时状态机确实是 idle。改看指令脉宽落在哪一档——
-       * 手动模式本来就是"给多少输出多少"，落在哪一档就是哪个物理位置。 */
-      if (Math.abs(s.target_us - lock) <= DETENT_TOL_US) {
+      /* 手动模式下状态机不跑，phase 通常恒为 idle；但手动闸门扣住锁止档命令时
+       * phase 会报 pending_sync——必须先显示等待状态，否则"滑杆 2000、输出 1500"
+       * 会被误读成通道故障。 */
+      if (s.phase === "pending_sync") {
+        badge.textContent = "等待同步";
+        badge.className = "badge pending_sync";
+      } else if (Math.abs(s.target_us - lock) <= DETENT_TOL_US) {
         badge.textContent = "锁定位";
         badge.className = "badge locked";
       } else if (Math.abs(s.target_us - unlock) <= DETENT_TOL_US) {
@@ -751,6 +765,10 @@ function echoServoCfg(sv, cfg) {
   echoNum($("sholdmax"), cfg.hold_max_ms);
   echoNum($("sprobe"), cfg.probe_ms);
   echoNum($("sspeed"), cfg.sim_speed);
+  echoNum($("sgatespeed"), cfg.gate_speed);
+  echoNum($("sgatedelta"), cfg.gate_delta);
+  echoNum($("sgatestable"), cfg.gate_stable_ms);
+  echoChk($("smanualgate"), cfg.manual_gate);
 }
 
 function renderRc(rv) {
@@ -1190,7 +1208,8 @@ function drawCamOverlay() {
       if (servo.mode === "manual") {
         const lock = (scfg.lock_us || [])[i] ?? 2000;
         const unlock = (scfg.unlock_us || [])[i] ?? 1500;
-        state = Math.abs(s.target_us - lock) <= DETENT_TOL_US ? "锁定位"
+        state = s.phase === "pending_sync" ? "等待同步"
+              : Math.abs(s.target_us - lock) <= DETENT_TOL_US ? "锁定位"
               : Math.abs(s.target_us - unlock) <= DETENT_TOL_US ? "解锁位" : "手动";
       } else {
         state = PHASE_TEXT[s.phase] || s.phase;
@@ -1973,6 +1992,10 @@ function applyServoCfg() {
     lock_hold_max_ms: parseInt($("sholdmax").value, 10),
     probe_window_ms: parseInt($("sprobe").value, 10),
     servo_sim_speed_us_s: parseInt($("sspeed").value, 10),
+    lock_max_speed_rpm: parseFloat($("sgatespeed").value),
+    lock_max_delta_rpm: parseFloat($("sgatedelta").value),
+    lock_sync_stable_ms: parseInt($("sgatestable").value, 10),
+    manual_gate_enable: $("smanualgate").checked,
   });
   dirty.servo = false;
 }
