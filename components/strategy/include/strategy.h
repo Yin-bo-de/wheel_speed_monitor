@@ -9,8 +9,9 @@
  * 锁差速这个动作本身会把该轴左右轮速差抹平（两轮被强制同步），于是
  * "比例低于阈值"在锁定后必然成立，必然松开；松开后打滑重现又必然锁回去，
  * 形成稳定振荡。被控制动作污染的信号不能拿来做控制判断。
- * 因此每轴维护一个三态状态机：IDLE（正常判定）→ LOCKED（只看时间，不看
- * 轮速差）→ PROBE（松开试探，试探失败则退回 LOCKED 并延长保持时长）。
+ * 因此每轴维护一个四态状态机：IDLE（正常判定）→ PENDING_SYNC（带着锁止
+ * 意图等同步窗口，防高速打牙）→ LOCKED（只看时间，不看轮速差）→
+ * PROBE（松开试探，试探失败则退回 LOCKED 并延长保持时长）。
  */
 #ifndef STRATEGY_H
 #define STRATEGY_H
@@ -34,9 +35,10 @@ typedef enum {
 
 /* 每轴状态机阶段。 */
 typedef enum {
-    STRATEGY_PHASE_IDLE = 0, /* 解锁，正常盯比例 */
-    STRATEGY_PHASE_LOCKED,   /* 锁定保持中——只看时间，不看轮速差 */
-    STRATEGY_PHASE_PROBE,    /* 松开试探中——动/停状态不变地连续保持满窗口即算脱困 */
+    STRATEGY_PHASE_IDLE = 0,     /* 解锁，正常盯比例 */
+    STRATEGY_PHASE_LOCKED,       /* 锁定保持中——只看时间，不看轮速差 */
+    STRATEGY_PHASE_PROBE,        /* 松开试探中——动/停状态不变地连续保持满窗口即算脱困 */
+    STRATEGY_PHASE_PENDING_SYNC, /* 等待同步——带锁止意图等双闸门窗口，期间输出解锁档 */
 } strategy_phase_t;
 
 typedef struct {
@@ -58,6 +60,16 @@ typedef struct {
     uint32_t lock_hold_ms;      /* 初始锁定保持时长（"地形时间"） */
     uint32_t lock_hold_max_ms;  /* 保持时长翻倍上限 */
     uint32_t probe_window_ms;   /* 试探窗口：车连续动满此时长才算脱困 */
+
+    /* ---- 打牙防护双闸门（v7 起）---- */
+    /* 车速闸门：慢轮近似车身速度（空转轮不推车），低于此值才允许锁。
+     * 速差闸门：左右速差绝对值低于此值才允许锁，直接限制锁止冲击。 */
+    float lock_max_speed_rpm;
+    float lock_max_delta_rpm;
+    /* 双闸门连续满足多久才真正落锁；0 = 窗口满足第一拍即锁（对照用） */
+    uint32_t lock_sync_stable_ms;
+    /* 手动模式锁止档命令同样过闸门（打牙防护优先于操作者意图），默认开 */
+    bool manual_gate_enable;
 } strategy_config_t;
 
 typedef struct {
@@ -75,7 +87,8 @@ typedef struct {
 } strategy_state_t;
 
 /* 填入缺省配置（两档脉宽 解锁 1500 / 锁定 2000、使能、自动模式、
- * 门槛 0.30、最低 10 转/分、确认 3000ms、保持 3000ms、上限 30000ms、试探 2000ms）。 */
+ * 门槛 0.30、最低 10 转/分、确认 3000ms、保持 3000ms、上限 30000ms、试探 2000ms、
+ * 车速闸门 60 转/分、速差闸门 40 转/分、稳定期 300ms、手动闸门开）。 */
 void strategy_config_default(strategy_config_t *cfg);
 
 /* 复位状态机与保持计时。模式/使能/映射/门槛变更后由上层调用，
