@@ -335,6 +335,16 @@ static esp_err_t handle_set_cfg(const char *payload)
     TRY_U32("probe_window_ms", probe_window_ms);
     TRY_U32("servo_sim_speed_us_s", servo_sim_speed_us_s);
 
+    /* ---- v7：打牙防护双闸门（manual_gate_enable 为 bool，走 cJSON 布尔分支） ---- */
+    TRY_F32("lock_max_speed_rpm", lock_max_speed_rpm);
+    TRY_F32("lock_max_delta_rpm", lock_max_delta_rpm);
+    TRY_U32("lock_sync_stable_ms", lock_sync_stable_ms);
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "manual_gate_enable")) != NULL &&
+        cJSON_IsBool(j)) {
+        next.manual_gate_enable = cJSON_IsTrue(j);
+        changed = true;
+    }
+
     /* ---- v4：遥控输入（验证台注入三路模拟脉宽） ---- */
     if ((j = cJSON_GetObjectItemCaseSensitive(root, "rc_sim")) != NULL && cJSON_IsBool(j)) {
         next.rc_sim = cJSON_IsTrue(j);

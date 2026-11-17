@@ -4,7 +4,7 @@
  * 拼进 collectors 数组。字段名/小数位即前端协议，固定不变。
  *
  * phase 字段是验证锁定策略的主要观测手段：锁定期间轮速差被自己的动作抹平，
- * 光看数值看不出状态机在做什么，必须把 idle/locked/probe 三态显式传出去。
+ * 光看数值看不出状态机在做什么，必须把 idle/pending_sync/locked/probe 四态显式传出去。
  *
  * 刻意只吃基本类型（不引用 servo_act 的类型），渲染层不该反向依赖执行器组件。
  */
@@ -49,7 +49,7 @@ typedef struct {
 esp_err_t servo_render_block(const servo_render_state_t *rs,
                              char *buf, size_t len, size_t *used);
 
-/* 阶段名（"idle"/"locked"/"probe"），供渲染与测试共用。 */
+/* 阶段名（"idle"/"pending_sync"/"locked"/"probe"），供渲染与测试共用。 */
 const char *strategy_phase_name(strategy_phase_t phase);
 
 #ifdef __cplusplus

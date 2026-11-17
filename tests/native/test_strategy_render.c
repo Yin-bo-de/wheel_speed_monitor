@@ -72,9 +72,13 @@ static void test_all_required_fields(void)
     assert_contains(buf, "\"hold_max_ms\":30000");
     assert_contains(buf, "\"probe_ms\":2000");
     assert_contains(buf, "\"sim_speed\":3000");
+    assert_contains(buf, "\"gate_speed\":60.0");
+    assert_contains(buf, "\"gate_delta\":40.0");
+    assert_contains(buf, "\"gate_stable_ms\":300");
+    assert_contains(buf, "\"manual_gate\":true");
 }
 
-/* 2. 三态 phase 各自渲染成对应字符串 */
+/* 2. 四态 phase 各自渲染成对应字符串 */
 static void test_phase_strings(void)
 {
     fresh();
@@ -83,27 +87,32 @@ static void test_phase_strings(void)
 
     rs.ch[0].phase = STRATEGY_PHASE_LOCKED;
     rs.ch[0].hold_ms = 6000;
-    rs.ch[1].phase = STRATEGY_PHASE_PROBE;
+    rs.ch[1].phase = STRATEGY_PHASE_PENDING_SYNC;
     servo_render_block(&rs, buf, sizeof(buf), &used);
     assert_contains(buf, "\"i\":0,\"en\":true,\"phase\":\"locked\",\"hold_ms\":6000");
-    assert_contains(buf, "\"i\":1,\"en\":true,\"phase\":\"probe\"");
+    assert_contains(buf, "\"i\":1,\"en\":true,\"phase\":\"pending_sync\"");
 
     TEST_ASSERT_EQUAL_STRING("idle", strategy_phase_name(STRATEGY_PHASE_IDLE));
     TEST_ASSERT_EQUAL_STRING("locked", strategy_phase_name(STRATEGY_PHASE_LOCKED));
     TEST_ASSERT_EQUAL_STRING("probe", strategy_phase_name(STRATEGY_PHASE_PROBE));
+    TEST_ASSERT_EQUAL_STRING("pending_sync", strategy_phase_name(STRATEGY_PHASE_PENDING_SYNC));
 }
 
-/* 3. 每通道的两档脉宽独立回显：前轴换一组，后轴不动 */
+/* 3. 每通道的两档脉宽独立回显：前轴换一组，后轴不动；闸门回显同字段口径 */
 static void test_two_detents_echo_per_channel(void)
 {
     fresh();
     rs.cfg.unlock_us[0] = 1180;
     rs.cfg.lock_us[0] = 2120;
+    rs.cfg.lock_max_delta_rpm = 50.0f;
+    rs.cfg.manual_gate_enable = false;
     char buf[1024];
     size_t used = 0;
     servo_render_block(&rs, buf, sizeof(buf), &used);
     assert_contains(buf, "\"unlock_us\":[1180,1500]");
     assert_contains(buf, "\"lock_us\":[2120,2000]");
+    assert_contains(buf, "\"gate_delta\":50.0");
+    assert_contains(buf, "\"manual_gate\":false");
 }
 
 /* 4. 打滑诊断字段透出 */

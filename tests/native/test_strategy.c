@@ -24,6 +24,16 @@ static void fresh(void)
     strategy_init();
 }
 
+/* 老路径测试专用：关掉双闸门（阈值放到量程顶、稳定期归零）。闸门全开且
+ * stable=0 时，窗口满足的第一拍（PENDING_SYNC 的下一拍）即落锁——老测试的
+ * "确认期满直接 LOCKED"预期整体顺延一拍 50ms，见下方各测试的计时修改。 */
+static void gates_open(void)
+{
+    cfg.lock_max_speed_rpm = 2000.0f;
+    cfg.lock_max_delta_rpm = 2000.0f;
+    cfg.lock_sync_stable_ms = 0;
+}
+
 /* 单次喂入四轮转速（左前,右前,左后,右后）。 */
 static void feed(float lf, float rf, float lr, float rr, uint32_t now_ms)
 {
@@ -57,6 +67,10 @@ static void test_config_defaults(void)
     TEST_ASSERT_EQUAL_UINT32(3000, cfg.lock_hold_ms);
     TEST_ASSERT_EQUAL_UINT32(30000, cfg.lock_hold_max_ms);
     TEST_ASSERT_EQUAL_UINT32(2000, cfg.probe_window_ms);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 60.0f, cfg.lock_max_speed_rpm);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 40.0f, cfg.lock_max_delta_rpm);
+    TEST_ASSERT_EQUAL_UINT32(300, cfg.lock_sync_stable_ms);
+    TEST_ASSERT_TRUE(cfg.manual_gate_enable);
 }
 
 /* 2. 解锁档是每通道独立的一档：只有改过的那一轴变，另一轴不受影响 */
@@ -75,10 +89,11 @@ static void test_unlock_us_per_channel(void)
 static void test_lock_us_per_channel(void)
 {
     fresh();
+    gates_open();
     cfg.lock_us[0] = 2000;
     cfg.lock_us[1] = 1000; /* 后轴装反：锁定去行程另一端 */
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 200, 60); /* 前后轴同时打滑并走满确认期 */
+    run(&t, 3100, 200, 60, 200, 60); /* 前后轴同时打滑并走满确认期 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[1].phase);
@@ -91,6 +106,7 @@ static void test_lock_us_per_channel(void)
 static void test_auto_output_is_two_detent_only(void)
 {
     fresh();
+    gates_open();
     cfg.unlock_us[0] = 1300;
     cfg.lock_us[0] = 1750;
     uint32_t t = 0;
@@ -99,7 +115,7 @@ static void test_auto_output_is_two_detent_only(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT16(1300, st.servo[0].target_us);
 
-    run(&t, 3050, 200, 60, 60, 60); /* 打滑满确认期 → 锁定档 */
+    run(&t, 3100, 200, 60, 60, 60); /* 打滑满确认期 → 锁定档 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT16(1750, st.servo[0].target_us);
 
@@ -113,8 +129,9 @@ static void test_auto_output_is_two_detent_only(void)
 static void test_slip_locks_that_axle_only(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60); /* 前轴比例 |200-60|/200 = 0.70，走满确认期 */
+    run(&t, 3100, 200, 60, 60, 60); /* 前轴比例 |200-60|/200 = 0.70，走满确认期 */
 
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
@@ -129,8 +146,9 @@ static void test_slip_locks_that_axle_only(void)
 static void test_locked_ignores_ratio(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60);    /* 走满确认期锁上，保持 3000ms */
+    run(&t, 3100, 200, 60, 60, 60);    /* 走满确认期锁上，保持 3000ms */
     run(&t, 2000, 60, 60, 60, 60);     /* 差速锁住 → 两轮同步 → 比例归零 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
@@ -141,8 +159,9 @@ static void test_locked_ignores_ratio(void)
 static void test_hold_expires_into_probe(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60);
+    run(&t, 3100, 200, 60, 60, 60);
     run(&t, 3050, 60, 60, 60, 60); /* 累计越过 3000ms 保持期 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PROBE, st.servo[0].phase);
@@ -153,8 +172,9 @@ static void test_hold_expires_into_probe(void)
 static void test_probe_relock_doubles_hold(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60);
+    run(&t, 3100, 200, 60, 60, 60);
     run(&t, 3050, 60, 60, 60, 60);
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PROBE, st.servo[0].phase);
@@ -171,12 +191,13 @@ static void test_probe_relock_doubles_hold(void)
 static void test_hold_doubling_caps(void)
 {
     fresh();
+    gates_open();
     cfg.lock_hold_ms = 20000;
     cfg.lock_hold_max_ms = 30000;
     strategy_init();
 
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60);     /* 走满确认期锁上，hold=20000 */
+    run(&t, 3100, 200, 60, 60, 60);     /* 走满确认期锁上，hold=20000 */
     run(&t, 20050, 60, 60, 60, 60);     /* → PROBE */
     run(&t, 50, 200, 60, 60, 60);       /* 回锁，翻倍被上限截住 */
     strategy_get_state(&st);
@@ -189,8 +210,9 @@ static void test_hold_doubling_caps(void)
 static void test_probe_window_restarts_on_state_change(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60);   /* 走满确认期锁上 */
+    run(&t, 3100, 200, 60, 60, 60);   /* 走满确认期锁上 */
     run(&t, 3050, 60, 60, 60, 60);    /* → PROBE，在动，开始计时 */
     run(&t, 1000, 0, 0, 0, 0);        /* 刚停下 1 秒：翻转 → 重新计时 */
     strategy_get_state(&st);
@@ -209,9 +231,10 @@ static void test_probe_window_restarts_on_state_change(void)
 static void test_probe_success_resets_hold(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60);
-    run(&t, 3050, 60, 60, 60, 60);       /* → PROBE */
+    run(&t, 3100, 200, 60, 60, 60);
+    run(&t, 3100, 60, 60, 60, 60);       /* → PROBE */
     run(&t, 50, 200, 60, 60, 60);        /* 回锁，hold 翻到 6000 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
@@ -268,10 +291,11 @@ static void test_manual_passthrough(void)
 static void test_lock_equals_unlock_keeps_still(void)
 {
     fresh();
+    gates_open();
     cfg.unlock_us[0] = 1600;
     cfg.lock_us[0] = 1600;
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60);
+    run(&t, 3100, 200, 60, 60, 60);
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase); /* 判定照跑 */
     TEST_ASSERT_EQUAL_UINT16(1600, st.servo[0].target_us);           /* 只是不动 */
@@ -281,8 +305,9 @@ static void test_lock_equals_unlock_keeps_still(void)
 static void test_init_resets_state(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60); /* 走满确认期才锁上 */
+    run(&t, 3100, 200, 60, 60, 60); /* 走满确认期才锁上 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
 
@@ -309,8 +334,9 @@ static void test_arg_guards(void)
 static void test_backoff_resets_when_slip_clears(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60); /* 走满确认期锁上 3000 */
+    run(&t, 3100, 200, 60, 60, 60); /* 走满确认期锁上 3000 */
     run(&t, 3050, 200, 60, 60, 60); /* 保持走完 → PROBE → 仍打滑，回锁 6000 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
@@ -320,7 +346,7 @@ static void test_backoff_resets_when_slip_clears(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
 
-    run(&t, 3050, 200, 60, 60, 60); /* 再打滑：确认期与退避都从头开始 */
+    run(&t, 3100, 200, 60, 60, 60); /* 再打滑：确认期与退避都从头开始 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
     TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
@@ -332,8 +358,9 @@ static void test_backoff_resets_when_slip_clears(void)
 static void test_backoff_resets_when_stopped(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
-    run(&t, 3050, 200, 60, 60, 60); /* 走满确认期锁上 */
+    run(&t, 3100, 200, 60, 60, 60); /* 走满确认期锁上 */
     run(&t, 3050, 200, 60, 60, 60); /* 回锁 6000 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
@@ -343,7 +370,7 @@ static void test_backoff_resets_when_stopped(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
 
-    run(&t, 3050, 200, 60, 60, 60); /* 再打滑：确认期与退避都从 3000 重新开始 */
+    run(&t, 3100, 200, 60, 60, 60); /* 再打滑：确认期与退避都从 3000 重新开始 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
 }
@@ -360,18 +387,25 @@ static void test_slip_first_tick_not_locked(void)
     TEST_ASSERT_EQUAL_UINT32(0, st.servo[0].hold_ms);
 }
 
-/* 21. 连续打滑满确认期（默认 3000ms）才锁定：差 50ms 都还留在 IDLE。
- * 首个打滑样本在 t=50，锁定发生在 t=3050，即"连续 60 拍之后"。 */
+/* 21. 连续打滑满确认期（默认 3000ms）才离开 IDLE，先落 PENDING_SYNC 再落锁。
+ * 首个打滑样本在 t=50，确认期满在 t=3050；闸门全开后窗口满足的第一拍
+ * （t=3100）落锁——改造后 LOCKED 比改造前晚一拍。 */
 static void test_slip_confirm_period_required(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
     run(&t, 3000, 200, 60, 60, 60);
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
     TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
 
-    run(&t, 50, 200, 60, 60, 60); /* 再走一拍，确认期满 3000ms → 锁定 */
+    run(&t, 50, 200, 60, 60, 60); /* 确认期满 3000ms → 进 PENDING_SYNC，不直接锁 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    run(&t, 50, 200, 60, 60, 60); /* 窗口满足的第一拍 → 锁定 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
     TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
@@ -382,6 +416,7 @@ static void test_slip_confirm_period_required(void)
 static void test_confirm_resets_when_slip_clears(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
     run(&t, 2500, 200, 60, 60, 60); /* 确认到一半 */
     run(&t, 50, 60, 60, 60, 60);    /* 速差回落一拍 → 确认作废 */
@@ -392,7 +427,7 @@ static void test_confirm_resets_when_slip_clears(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
 
-    run(&t, 100, 200, 60, 60, 60); /* 从新的起点满 3000ms → 锁定 */
+    run(&t, 150, 200, 60, 60, 60); /* 满 3000ms 进 PENDING，再一拍落锁 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
 }
@@ -401,6 +436,7 @@ static void test_confirm_resets_when_slip_clears(void)
 static void test_confirm_resets_when_stopped(void)
 {
     fresh();
+    gates_open();
     uint32_t t = 0;
     run(&t, 2500, 200, 60, 60, 60);
     run(&t, 50, 0, 0, 60, 60); /* 前轴停转一拍 */
@@ -411,7 +447,7 @@ static void test_confirm_resets_when_stopped(void)
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
 
-    run(&t, 100, 200, 60, 60, 60);
+    run(&t, 150, 200, 60, 60, 60); /* 满 3000ms 进 PENDING，再一拍落锁 */
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
 }
@@ -420,13 +456,286 @@ static void test_confirm_resets_when_stopped(void)
 static void test_confirm_zero_locks_immediately(void)
 {
     fresh();
+    gates_open();
     cfg.slip_confirm_ms = 0;
     uint32_t t = 0;
-    run(&t, 50, 200, 60, 60, 60);
+    run(&t, 100, 200, 60, 60, 60);
     strategy_get_state(&st);
     TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
     TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
     TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
+}
+
+/* 25. 陷车大速差：确认期满落 PENDING_SYNC 而非 LOCKED，输出保持解锁档；
+ * 不设等待超时——打滑持续时等再久也不落锁、也不放弃意图 */
+static void test_stuck_goes_pending_not_locked(void)
+{
+    fresh();
+    uint32_t t = 0;
+    run(&t, 3050, 600, 0, 60, 60); /* 快轮空转、慢轮停：速差 600 远超闸门 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+    TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms); /* 锁定时长已备好，等窗口 */
+
+    run(&t, 30000, 600, 0, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+}
+
+/* 26. 窗口连续稳定满 lock_sync_stable_ms 才落锁：差一拍都不锁 */
+static void test_pending_locks_on_stable_window(void)
+{
+    fresh();
+    cfg.lock_max_speed_rpm = 200.0f; /* 只留速差闸门：慢轮 82 必须放行 */
+    uint32_t t = 0;
+    run(&t, 3050, 120, 82, 60, 60); /* 比例 0.32 打滑，速差 38 < 40 窗口在手 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+
+    run(&t, 300, 120, 82, 60, 60); /* 窗口从 t=3100 起算，t=3350 时累计 250ms */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    run(&t, 50, 120, 82, 60, 60); /* t=3400 满 300ms → 落锁 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
+    TEST_ASSERT_EQUAL_UINT32(3000, st.servo[0].hold_ms);
+}
+
+/* 27. 窗口被速差尖峰打断 → 稳定计时清零重来（松油门过程速差扫过阈值区
+ * 来回摆动的典型形态：必须连续稳定，瞬时扫过不算数） */
+static void test_pending_window_resets_on_break(void)
+{
+    fresh();
+    cfg.lock_max_speed_rpm = 200.0f;
+    uint32_t t = 0;
+    run(&t, 3050, 120, 82, 60, 60);  /* → PENDING，窗口从 t=3100 起算 */
+    run(&t, 200, 120, 82, 60, 60);   /* t=3250：累计 150ms */
+    run(&t, 50, 200, 60, 60, 60);    /* t=3300：速差尖峰一拍，计时清零 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+
+    run(&t, 300, 120, 82, 60, 60);   /* t=3350 起重新计数，t=3600 累计 250ms */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+
+    run(&t, 50, 120, 82, 60, 60);    /* t=3650 满 300ms → 落锁 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+}
+
+/* 28. 等待期间打滑消失 → 回 IDLE，退避与输出都复位 */
+static void test_pending_returns_idle_when_slip_clears(void)
+{
+    fresh();
+    uint32_t t = 0;
+    run(&t, 3050, 600, 0, 60, 60); /* → PENDING */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+
+    run(&t, 50, 60, 60, 60, 60); /* 速差消失（脱困或轮停）→ IDLE */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT32(0, st.servo[0].hold_ms);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+}
+
+/* 29. 速差闸门严格小于：差恰 40 挡、39 放（stable=0 便于边界直测） */
+static void test_delta_gate_strict_boundary(void)
+{
+    fresh();
+    cfg.slip_confirm_ms = 0;       /* 立即进 PENDING */
+    cfg.lock_sync_stable_ms = 0;   /* 窗口满足第一拍落锁 */
+    cfg.lock_max_speed_rpm = 2000.0f;
+    uint32_t t = 0;
+
+    run(&t, 50, 120, 80, 60, 60); /* 速差恰 40：不满足 → PENDING */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+
+    run(&t, 50, 120, 81, 60, 60); /* 速差 39：满足 → 下一拍锁定 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+}
+
+/* 30. 车速闸门独立生效：速差小但慢轮超速也挡住（行驶中误锁场景——
+ * 高转速下 EMA 滤波滞后让实测速差偏小，单靠速差闸门不可靠） */
+static void test_speed_gate_blocks_fast_slip(void)
+{
+    fresh();
+    cfg.lock_max_delta_rpm = 500.0f; /* 只留车速闸门 */
+    uint32_t t = 0;
+    run(&t, 3050, 300, 150, 60, 60); /* 比例 0.5 打滑；慢轮 150 > 60 超速 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    cfg.lock_max_speed_rpm = 200.0f; /* 抬闸门后窗口满足，稳定 300ms 落锁 */
+    run(&t, 300, 300, 150, 60, 60); /* 窗口从 t=3100 起算，t=3350 累计 250ms */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    run(&t, 50, 300, 150, 60, 60); /* t=3400 满 300ms → 落锁 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+}
+
+/* 31. 陷车时间线全程（对应方案「陷车场景时间线」1-4 步）：
+ * 600/0 空转 → 确认 3 秒 → 等待（不落锁）→ 松油门速差收敛 → 稳定 300ms 落锁 → 脱困 */
+static void test_stuck_timeline(void)
+{
+    fresh();
+    cfg.lock_max_speed_rpm = 200.0f; /* 标定值：日常慢轮分布下限之上留余量 */
+    uint32_t t = 0;
+
+    /* 1) 陷车：快轮 600 空转、慢轮 0，打滑确认 3 秒 → PENDING_SYNC */
+    run(&t, 3050, 600, 0, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    /* 2) 速差 600 远超 40：不落锁、输出保持解锁，此刻锁止就是打牙，等 */
+    run(&t, 30000, 600, 0, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+
+    /* 3) 司机松油门：快轮减速，速差收敛进阈值、稳定 300ms → 落锁 */
+    run(&t, 350, 120, 82, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
+
+    /* 4) 再给油：两轮同步驱动脱困，锁定按时间保持 → 试探 */
+    run(&t, 3050, 200, 200, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PROBE, st.servo[0].phase);
+}
+
+/* 32. 试探期再打滑但窗口不在手 → PENDING_SYNC，退避翻倍保留；
+ * 窗口到手后带着翻倍时长落锁 */
+static void test_probe_relock_unsynced_waits(void)
+{
+    fresh();
+    cfg.lock_max_speed_rpm = 200.0f;
+    uint32_t t = 0;
+    run(&t, 3050, 200, 60, 60, 60);  /* 大速差：确认期满 → PENDING */
+    run(&t, 350, 120, 82, 60, 60);   /* 窗口满足稳定 → LOCKED（hold=3000） */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+    run(&t, 3050, 60, 60, 60, 60);   /* 保持走完 → PROBE */
+    run(&t, 50, 600, 0, 60, 60);     /* 再打滑、未同步 → PENDING，退避翻倍 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    run(&t, 350, 120, 82, 60, 60);   /* 窗口收敛稳定 → 带着翻倍时长落锁 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
+}
+
+/* 33. 试探期再打滑且窗口在手 → 直接锁回，退避翻倍保留（不绕 PENDING） */
+static void test_probe_relock_synced_direct(void)
+{
+    fresh();
+    cfg.lock_max_speed_rpm = 200.0f;
+    uint32_t t = 0;
+    run(&t, 3050, 200, 60, 60, 60);
+    run(&t, 350, 120, 82, 60, 60);
+    run(&t, 3050, 60, 60, 60, 60);   /* → PROBE */
+    run(&t, 50, 120, 82, 60, 60);    /* 再打滑，窗口在手 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_LOCKED, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT32(6000, st.servo[0].hold_ms);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
+}
+
+/* 34. 手动锁止档命令过闸门：闸门不满足扣住解锁档并报 PENDING_SYNC，
+ * 窗口稳定后持续放行（放行后只要窗口不破就保持锁止档） */
+static void test_manual_gate_holds_lock_command(void)
+{
+    fresh();
+    cfg.mode = STRATEGY_MODE_MANUAL;
+    cfg.manual_us[0] = cfg.lock_us[0]; /* 2000 = 锁止档命令 */
+    uint32_t t = 0;
+
+    run(&t, 500, 600, 0, 60, 60); /* 大速差：闸门不满足 → 扣住 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us); /* 输出保持解锁档 */
+
+    cfg.lock_max_speed_rpm = 200.0f;
+    run(&t, 300, 120, 82, 60, 60); /* 窗口从 t=550 起算，t=800 累计 250ms */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    run(&t, 50, 120, 82, 60, 60); /* t=850 满 300ms → 放行锁止档 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
+}
+
+/* 35. 手动闸门窗口与自动同规则：尖峰打断稳定计时（防松油门扫过阈值区的瞬时触发） */
+static void test_manual_gate_window_resets(void)
+{
+    fresh();
+    cfg.mode = STRATEGY_MODE_MANUAL;
+    cfg.manual_us[0] = cfg.lock_us[0];
+    cfg.lock_max_speed_rpm = 200.0f;
+    uint32_t t = 0;
+    run(&t, 250, 120, 82, 60, 60);  /* t=250：稳定 200ms */
+    run(&t, 50, 200, 60, 60, 60);   /* t=300：尖峰一拍，计时清零 */
+    run(&t, 300, 120, 82, 60, 60);  /* t=600：重新累计 250ms，仍差一拍 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_PENDING_SYNC, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+    run(&t, 50, 120, 82, 60, 60);   /* t=650：满 300ms → 放行 */
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
+}
+
+/* 36. 解锁档命令与关闸门都不拦：立即生效（旧行为保留路径） */
+static void test_manual_gate_passthrough_cases(void)
+{
+    fresh();
+    cfg.mode = STRATEGY_MODE_MANUAL;
+    uint32_t t = 0;
+
+    cfg.manual_us[0] = 1500; /* = 解锁档：不是锁止命令，不闸门 */
+    run(&t, 500, 600, 0, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    cfg.manual_gate_enable = false; /* 关闸门：锁止命令也直通 */
+    cfg.manual_us[0] = 2000;
+    run(&t, 500, 600, 0, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_INT(STRATEGY_PHASE_IDLE, st.servo[0].phase);
+    TEST_ASSERT_EQUAL_UINT16(2000, st.servo[0].target_us);
+}
+
+/* 37. 锁止档判定容差 ±20µs：与前端 DETENT_TOL_US 同一约定 */
+static void test_manual_gate_detent_tolerance(void)
+{
+    fresh();
+    cfg.mode = STRATEGY_MODE_MANUAL;
+    uint32_t t = 0;
+
+    cfg.manual_us[0] = 2020; /* 距锁定档 20µs：算锁止命令 → 闸门扣住 */
+    run(&t, 500, 600, 0, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_UINT16(1500, st.servo[0].target_us);
+
+    cfg.manual_us[0] = 2021; /* 距锁定档 21µs：不算锁止命令 → 直通 */
+    run(&t, 500, 600, 0, 60, 60);
+    strategy_get_state(&st);
+    TEST_ASSERT_EQUAL_UINT16(2021, st.servo[0].target_us);
 }
 
 NATIVE_TEST_MAIN(
@@ -454,4 +763,17 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_confirm_resets_when_slip_clears, "test_confirm_resets_when_slip_clears", __LINE__);
     UnityDefaultTestRun(test_confirm_resets_when_stopped, "test_confirm_resets_when_stopped", __LINE__);
     UnityDefaultTestRun(test_confirm_zero_locks_immediately, "test_confirm_zero_locks_immediately", __LINE__);
+    UnityDefaultTestRun(test_stuck_goes_pending_not_locked, "test_stuck_goes_pending_not_locked", __LINE__);
+    UnityDefaultTestRun(test_pending_locks_on_stable_window, "test_pending_locks_on_stable_window", __LINE__);
+    UnityDefaultTestRun(test_pending_window_resets_on_break, "test_pending_window_resets_on_break", __LINE__);
+    UnityDefaultTestRun(test_pending_returns_idle_when_slip_clears, "test_pending_returns_idle_when_slip_clears", __LINE__);
+    UnityDefaultTestRun(test_delta_gate_strict_boundary, "test_delta_gate_strict_boundary", __LINE__);
+    UnityDefaultTestRun(test_speed_gate_blocks_fast_slip, "test_speed_gate_blocks_fast_slip", __LINE__);
+    UnityDefaultTestRun(test_stuck_timeline, "test_stuck_timeline", __LINE__);
+    UnityDefaultTestRun(test_probe_relock_unsynced_waits, "test_probe_relock_unsynced_waits", __LINE__);
+    UnityDefaultTestRun(test_probe_relock_synced_direct, "test_probe_relock_synced_direct", __LINE__);
+    UnityDefaultTestRun(test_manual_gate_holds_lock_command, "test_manual_gate_holds_lock_command", __LINE__);
+    UnityDefaultTestRun(test_manual_gate_window_resets, "test_manual_gate_window_resets", __LINE__);
+    UnityDefaultTestRun(test_manual_gate_passthrough_cases, "test_manual_gate_passthrough_cases", __LINE__);
+    UnityDefaultTestRun(test_manual_gate_detent_tolerance, "test_manual_gate_detent_tolerance", __LINE__);
 )
