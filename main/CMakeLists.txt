@@ -5,7 +5,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     EMBED_FILES "www/index.html"
     REQUIRES nvs_flash esp_wifi esp_netif esp_event esp_http_server json heap
-              app_update esp_partition littlefs
+              app_update esp_partition littlefs esp_driver_gpio
               telemetry wheel_speed wheel_sensor strategy servo_act servo_drv
               rc_input rc_capture camera_drv cam_rate log_core
 )

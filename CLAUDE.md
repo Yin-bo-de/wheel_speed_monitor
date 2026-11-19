@@ -73,12 +73,15 @@ ctest --test-dir tests/native/build --output-on-failure
 - **相机帧率在采集侧控制**：`camera_drv` 按实测基准改 OV2640 的 CLKRC / OV5640
   的 VTS（OV5640 在 S3 上还要接管 PLL 并重算 anti-banding）；网络自适应由纯 C
   的 `cam_rate` 计算有效帧率和自适应 JPEG 画质，修改也要给它补宿主机测试。
-- **OTA 写 flash 会停 cache**：升级在 httpd 任务里同步跑，不新增任务。写入前
-  必须 `bench_cam_suspend_for_ota()` 停相机和 MJPEG，并让 `ws_push_task` 通过
-  `bench_ota_busy()` 跳过广播；采样和舵机不停（PCNT/LEDC 是硬件计数，短暂停
-  cache 不丢状态）。新固件启动后 `app_main` 在 httpd 就绪时调用
-  `bench_ota_mark_valid()`，没确认就崩溃会被 bootloader 回滚。分区表变更、
-  版本号维护和首次 USB 烧录见 README「无线固件升级」。
+- **OTA 写 flash 会停 cache**：升级在 httpd 任务里同步跑，不新增任务。写入前必须
+  先 `wheel_servo_mute_set(true)` 等舵机静音回执（采样任务停波钉低，且要排在
+  日志刷盘等任何 flash 写之前），再 `bench_cam_suspend_for_ota()` 停相机和
+  MJPEG，并让 `ws_push_task` 通过 `bench_ota_busy()` 跳过广播；采样不停
+  （PCNT 硬件计数），舵机静音（波形冻结在升级前脉宽有堵转风险，重启窗口引脚
+  浮空更会被舵机解成随机脉冲，机理与三层防御见
+  docs/2026-11-18-OTA升级舵机信号静音方案.md）。新固件启动后 `app_main` 在
+  httpd 就绪时调用 `bench_ota_mark_valid()`，没确认就崩溃会被 bootloader 回滚。
+  分区表变更、版本号维护和首次 USB 烧录见 README「无线固件升级」。
 - **远程日志不新增任务**：`bench_log` 在 `app_main` 最早期 mount storage 上的
   LittleFS、装 vprintf 钩子；esp_timer 每 2s 刷盘（脏字节 >4KB 提前），单文件
   128KiB 封顶、总量 6MiB 配额。挂载失败不自动格式化（只有全 0xFF 的空分区

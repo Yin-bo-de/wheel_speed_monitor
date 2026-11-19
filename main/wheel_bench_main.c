@@ -23,6 +23,7 @@
  */
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -71,6 +72,22 @@ static rc_capture_t s_rc_cap;       /* GPIO 捕获句柄（惰性初始化） */
 static rc_resolved_t s_rc_res;      /* 本拍仲裁结果 */
 static rc_render_state_t s_rc_disp; /* 采样任务写、ws_push 读 */
 static bool s_rc_cap_failed;        /* 捕获初始化失败：不每 50ms 重试刷日志 */
+
+/* ---- OTA 舵机静音（docs/2026-11-18-OTA升级舵机信号静音方案.md）----
+ * req 由 httpd 任务写、muted 由采样任务写，32 位对齐访问天然原子
+ * （与 bench_ota 的 s_ota_busy 同款跨任务约定）。 */
+static volatile bool s_servo_mute_req;
+static volatile bool s_servo_muted;
+
+void wheel_servo_mute_set(bool mute)
+{
+    s_servo_mute_req = mute;
+}
+
+bool wheel_servo_muted(void)
+{
+    return s_servo_muted;
+}
 
 /* 执行器绑定：ops 和它的 ctx 必须同源。拆成两个独立变量就会出现"新 ops + 旧 ctx"
  * 的错配窗口——两边的 ctx 类型不同，等于拿 A 的结构体当 B 用。成对放进结构体，
@@ -327,6 +344,34 @@ static void rc_disp_fill(uint32_t now_ms)
 
 static void servo_control_step(uint32_t now_ms)
 {
+    /* ---- OTA 静音：优先级高于一切输出 ---- */
+    if (s_servo_mute_req && !s_servo_muted) {
+        /* 直接操作 LEDC、不看 s_act 指向谁：静音管的是硬件引脚，模拟执行器
+         * 模式下 LEDC 可能已接管过引脚（曾切过真舵机）。未初始化时返回
+         * INVALID_STATE，忽略即可。停波 = 驱动低电平 = 无脉冲 = 舵机脱力，
+         * 与"松开"同语义。 */
+        (void)servo_ledc_ops.set_enabled(&s_servo_ledc, 0, false);
+        (void)servo_ledc_ops.set_enabled(&s_servo_ledc, 1, false);
+        /* 状态机打回 IDLE：静音期间轮速仍在采样、打滑判定会累积，升级失败
+         * 恢复的第一拍若带着静音前的 LOCKED/退避等级出波就是锁定脉宽 */
+        strategy_init();
+        s_servo_muted = true;
+    }
+    if (s_servo_muted) {
+        if (!s_servo_mute_req) {
+            /* OTA 失败恢复：落回正常链路，strategy 已复位、第一拍解锁脉宽 */
+            s_servo_muted = false;
+        } else {
+            /* 快照照实报静音：OTA 期间 ws_push 跳过广播，这份主要供
+             * 失败恢复后的首帧与排查用 */
+            s_servo_disp.src = "muted";
+            for (int i = 0; i < STRATEGY_SERVO_COUNT; i++) {
+                s_servo_disp.ch[i].enabled = false;
+            }
+            return;
+        }
+    }
+
     servo_act_select(s_cfg.servo_sim);
     rc_source_step(now_ms);
     strat_cfg_build(&s_cfg, &s_strat_cfg);
@@ -528,6 +573,16 @@ static void wifi_ap_start(void)
 
 void app_main(void)
 {
+    /* 舵机信号脚先钉低再走启动流程：复位后到这里之间引脚浮空，悬空信号线
+     * 耦合的噪声会被舵机解成随机脉宽。输出低 = 无脉冲 = 脱力。LEDC 惰性
+     * 初始化时重新接管（init 尾部本来也先停波钉低）。跑在任务创建前，
+     * 无并发。 */
+    static const gpio_num_t servo_pins[] = { WHEEL_SERVO_GPIO_FRONT, WHEEL_SERVO_GPIO_REAR };
+    for (size_t i = 0; i < sizeof(servo_pins) / sizeof(servo_pins[0]); i++) {
+        (void)gpio_set_direction(servo_pins[i], GPIO_MODE_OUTPUT);
+        (void)gpio_set_level(servo_pins[i], 0);
+    }
+
     ESP_ERROR_CHECK(nvs_flash_init());
 
     /* 日志子系统最先起来：mount + 钩子装好后，本次启动日志才进得去

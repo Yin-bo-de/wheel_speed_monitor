@@ -8,6 +8,7 @@
 
 #include "bench_cam.h"
 #include "bench_log.h"
+#include "wheel_bench.h"
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -143,6 +144,22 @@ static bool read_content_length(httpd_req_t *req, size_t *out)
     return true;
 }
 
+/* 舵机静音握手（docs/2026-11-18-OTA升级舵机信号静音方案.md）：等采样任务
+ * 真正停波钉低再碰 flash。必须在任何 flash 写（含日志刷盘）之前调用——
+ * 那些操作停 cache 会卡住采样任务，握手就等不到了。
+ * 超时不挡升级：最坏情况只是上传期波形冻结在当前脉宽（确定信号），
+ * 卡死升级更糟。 */
+static void servo_mute_and_wait(void)
+{
+    wheel_servo_mute_set(true);
+    for (int i = 0; i < 50 && !wheel_servo_muted(); i++) {
+        vTaskDelay(pdMS_TO_TICKS(10)); /* 最长 500ms */
+    }
+    if (!wheel_servo_muted()) {
+        ESP_LOGW(TAG, "servo mute ack 超时，继续升级（波形将冻结在当前脉宽）");
+    }
+}
+
 static esp_err_t handle_info(httpd_req_t *req)
 {
     const esp_partition_t *run = esp_ota_get_running_partition();
@@ -220,6 +237,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
     }
 
     s_ota_busy = true;
+    servo_mute_and_wait(); /* 先静音再刷日志：日志刷盘是 flash 写，会卡采样任务 */
     bench_log_flush_now(); /* 崩溃/重启前的日志都落盘，再停写避开与 OTA 写交错 */
     bench_log_suspend(true);
     bench_cam_suspend_for_ota();
@@ -230,6 +248,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
         ESP_LOGE(TAG, "ota_begin failed: %s", esp_err_to_name(err));
         bench_cam_resume_after_ota();
         bench_log_suspend(false);
+        wheel_servo_mute_set(false);
         s_ota_busy = false;
         return send_error(req, "500 Internal Server Error", "ota begin failed");
     }
@@ -296,6 +315,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
         }
         bench_cam_resume_after_ota();
         bench_log_suspend(false);
+        wheel_servo_mute_set(false); /* 失败不重启：解除静音，采样任务下拍恢复 */
         s_ota_busy = false;
         return send_error(req, "500 Internal Server Error", fail_msg);
     }
@@ -334,9 +354,12 @@ static esp_err_t handle_rollback(httpd_req_t *req)
         state != ESP_OTA_IMG_VALID) {
         return send_error(req, "409 Conflict", "backup partition not verified");
     }
+    /* set_boot_partition 写 otadata 是 flash 操作：先静音，与上传路径同规矩 */
+    servo_mute_and_wait();
     esp_err_t err = esp_ota_set_boot_partition(other);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "rollback set_boot failed: %s", esp_err_to_name(err));
+        wheel_servo_mute_set(false); /* 没重启成：解除静音 */
         const char *status = (err == ESP_ERR_OTA_VALIDATE_FAILED)
                                  ? "409 Conflict" : "500 Internal Server Error";
         return send_error(req, status, "switch boot partition failed");
