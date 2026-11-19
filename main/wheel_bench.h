@@ -5,6 +5,8 @@
 #ifndef WHEEL_BENCH_H
 #define WHEEL_BENCH_H
 
+#include <stdbool.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -33,6 +35,13 @@ typedef struct {
 /* main 暴露：应用配置到采集器链（httpd 命令处理完调用一次）。
  * cfg 已按校验通过；此函数幂等，可在锁内调用。 */
 esp_err_t wheel_bench_apply_config(const cfg_params_t *cfg);
+
+/* OTA 舵机静音握手（docs/2026-11-18-OTA升级舵机信号静音方案.md）：
+ * mute_set 由 httpd 任务调（OTA 开始前 true / 失败恢复 false），
+ * 采样任务下一拍停波钉低后 wheel_servo_muted() 才返回 true。
+ * OTA 侧必须在任何 flash 写（含日志刷盘）之前等回执。 */
+void wheel_servo_mute_set(bool mute);
+bool wheel_servo_muted(void);
 
 #ifdef __cplusplus
 }
