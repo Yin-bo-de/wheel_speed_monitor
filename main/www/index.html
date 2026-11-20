@@ -79,6 +79,16 @@
   .cam-tools label { display:flex; align-items:center; gap:4px; }
   .cam-tools .spacer { flex:1 1 auto; }
   .cam-status { font-variant-numeric:tabular-nums; }
+  /* 录制角标：录的时候压在画面左上角，跟着全屏一起走。 */
+  .cam-rec-badge { position:absolute; top:10px; left:10px; z-index:3;
+    display:flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px;
+    background:rgba(0,0,0,0.65); color:#ff6b6b; font-size:12px; font-weight:600;
+    font-variant-numeric:tabular-nums; }
+  .cam-rec-badge[hidden] { display:none; }
+  .cam-rec-badge .rec-dot { width:8px; height:8px; border-radius:50%; background:#ff6b6b;
+    animation:rec-blink 1s step-start infinite; }
+  @keyframes rec-blink { 50% { opacity:0.2; } }
+  .cam-tools button.rec { border-color:#e57373; color:#e57373; }
   /* 手机上旋转按钮要够大；角度固定在两个按钮中间，避免布局跳动。 */
   .cam-rot-tools { display:inline-flex; align-items:center; gap:6px; }
   .cam-rot-tools button { padding:8px 12px; }
@@ -204,6 +214,7 @@
       <img id="cam-view" alt="摄像头画面">
       <canvas id="cam-overlay"></canvas>
       <div class="cam-hint" id="cam-hint">打开预览后按需启动相机</div>
+      <div class="cam-rec-badge" id="cam-rec-badge" hidden><span class="rec-dot"></span><span id="cam-rec-elapsed">录制中 0:00</span></div>
       <button id="cam-fs-exit" class="cam-fs-exit" type="button">退出全屏</button>
     </div>
     <div class="cam-tools">
@@ -220,9 +231,11 @@
       <span class="spacer"></span>
       <button id="cam-full" type="button">全屏</button>
       <button id="cam-snap">原始快照 ⤓</button>
+      <button id="cam-rec" type="button">开始录制</button>
     </div>
     <p class="hint">按需采集：打开本页预览才启动相机；离开本页后流和采集保持 30 秒，
-      30 秒内切回不断流。原始快照不带叠加，叠加层由浏览器绘制。</p>
+      30 秒内切回不断流。原始快照与录制都不带叠加，叠加层由浏览器绘制；
+      停止录制后优先走系统分享保存（可直接存入手机相册），不支持时退回浏览器下载。</p>
   </div>
 </section>
 
@@ -483,6 +496,22 @@ let camPollTimer = null;
 let camStaticUrl = null;
 let camErrorTimer = null;
 let camRotation = 0;
+/* 录制运行时状态：把 MJPEG 的 <img> 画进 canvas 再 captureStream 给 MediaRecorder。
+ * REC_MIME 为空表示浏览器不支持录制（iOS 老版本/部分 WebView）。 */
+let recRecorder = null;
+let recChunks = [];
+let recCanvas = null;
+let recDrawTimer = null;
+let recBadgeTimer = null;
+let recStartedAt = 0;
+const REC_MIME = (() => {
+  if (typeof MediaRecorder === "undefined") return null;
+  const cands = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  for (const m of cands) {
+    try { if (MediaRecorder.isTypeSupported(m)) return m; } catch (_) {}
+  }
+  return null;
+})();
 const CAM_ROTATION_KEY = "wheelCamRotation";
 const CAM_DEFAULT_ASPECT = 4 / 3;
 const CAM_OVERLAY_NAMES = ["轮速", "舵机", "遥控", "系统"];
@@ -1043,6 +1072,10 @@ function camUpdate(cam) {
   else if (!cam.streaming && !camStatic) camSetHint("按需待机：打开预览后启动");
   else camSetHint(null);
 
+  /* 相机中途关掉就自动收尾保存；录制按钮随摄像头开关状态刷新。 */
+  if (recRecorder && !camIsOn()) camRecStop();
+  camRecUpdateBtn();
+
   if (activeTab === "camera" && !document.hidden && !camStatic) camWatchdog();
 }
 
@@ -1103,6 +1136,111 @@ async function camDownloadSnapshot() {
       return;
     }
   }
+}
+
+/* 摄像头算“开”的状态：on 是采集中，idle 是已初始化待机；off/init/fail 都算没开。 */
+function camIsOn() {
+  return !!lastCam && (lastCam.state === "on" || lastCam.state === "idle");
+}
+
+function camRecUpdateBtn() {
+  const btn = $("cam-rec");
+  if (!btn) return;
+  if (!REC_MIME) {
+    btn.disabled = true;
+    btn.textContent = "开始录制";
+    btn.title = "当前浏览器不支持录制";
+    return;
+  }
+  btn.classList.toggle("rec", !!recRecorder);
+  btn.textContent = recRecorder ? "停止录制" : "开始录制";
+  /* 摄像头没开禁用按钮；录制中始终可点，否则相机断了就没法停。 */
+  btn.disabled = !recRecorder && !camIsOn();
+}
+
+function camRecBadge(show) {
+  const el = $("cam-rec-badge");
+  if (!el) return;
+  if (recBadgeTimer) { clearInterval(recBadgeTimer); recBadgeTimer = null; }
+  el.hidden = !show;
+  if (!show) return;
+  const tick = () => {
+    const s = Math.floor((Date.now() - recStartedAt) / 1000);
+    const label = $("cam-rec-elapsed");
+    if (label) label.textContent = `录制中 ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
+  tick();
+  recBadgeTimer = setInterval(tick, 1000);
+}
+
+function camRecStart() {
+  const img = $("cam-view");
+  if (!REC_MIME || recRecorder) return;
+  if (!img.naturalWidth) { camSetHint("画面尚未就绪，稍后再试"); return; }
+  recCanvas = document.createElement("canvas");
+  recCanvas.width = img.naturalWidth;
+  recCanvas.height = img.naturalHeight;
+  const ctx = recCanvas.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+  /* 25fps 重画 <img>：MJPEG 的 load 事件不保证节奏，固定频率画进 canvas 最稳。 */
+  recDrawTimer = setInterval(() => { try { ctx.drawImage(img, 0, 0); } catch (_) {} }, 40);
+  recChunks = [];
+  recRecorder = new MediaRecorder(recCanvas.captureStream(25), { mimeType: REC_MIME });
+  recRecorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+  recRecorder.onstop = camRecSave;
+  recRecorder.start(1000);
+  recStartedAt = Date.now();
+  camRecBadge(true);
+  camRecUpdateBtn();
+}
+
+function camRecStop() {
+  if (!recRecorder) return;
+  if (recDrawTimer) { clearInterval(recDrawTimer); recDrawTimer = null; }
+  try { recRecorder.stop(); } catch (_) {
+    recRecorder = null;
+    camRecBadge(false);
+    camRecUpdateBtn();
+    camSetHint("录制停止失败");
+  }
+}
+
+async function camRecSave() {
+  if (recDrawTimer) { clearInterval(recDrawTimer); recDrawTimer = null; }
+  recRecorder = null;
+  camRecBadge(false);
+  camRecUpdateBtn();
+  const blob = new Blob(recChunks, { type: REC_MIME.split(";")[0] });
+  recChunks = [];
+  if (!blob.size) { camSetHint("录制内容为空，未保存"); return; }
+  const ext = REC_MIME.indexOf("mp4") >= 0 ? "mp4" : "webm";
+  const name = "wheel-cam-" + new Date().toISOString().replace(/[:.]/g, "-") + "." + ext;
+  /* 手机上优先走系统分享：分享面板里的「存储视频」能直接进相册；
+   * 不支持或失败才退回浏览器下载。用户主动取消分享不算失败。 */
+  try {
+    const file = new File([blob], name, { type: blob.type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      camSetHint("已调起系统分享，可存入相册");
+      return;
+    }
+  } catch (err) {
+    if (err && err.name === "AbortError") { camSetHint("已取消保存"); return; }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  camSetHint("录制已保存为 " + name);
+}
+
+function camRecToggle() {
+  if (recRecorder) camRecStop();
+  else camRecStart();
 }
 
 function camPollStart() {
@@ -2037,6 +2175,8 @@ window.addEventListener("DOMContentLoaded", () => {
     $(id).addEventListener("change", camApplyQuickOverlay);
   });
   $("cam-snap").onclick = camDownloadSnapshot;
+  $("cam-rec").onclick = camRecToggle;
+  camRecUpdateBtn();
   $("cam-full").onclick = camToggleFullscreen;
   $("cam-fs-exit").onclick = camExitFullscreen;
   document.addEventListener("fullscreenchange", camUpdateFullscreenLabel);
