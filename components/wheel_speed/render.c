@@ -33,12 +33,15 @@ esp_err_t wheel_render_block(const wheel_render_state_t *rs,
     }
 
     RENDER_SNPRINTF("],\"cfg\":{\"magnets\":%lu,\"diam_mm\":%lu,\"alpha\":%.2f,"
-                    "\"debounce_ms\":%lu,\"sim\":%s,\"sim_rpm\":[%.1f,%.1f,%.1f,%.1f]}}",
+                    "\"debounce_ms\":%lu,\"sim\":%s,\"sim_rpm\":[%.1f,%.1f,%.1f,%.1f],"
+                    "\"gear_ratio\":[%.3f,%.3f,%.3f,%.3f]}}",
                     (unsigned long)rs->magnets, (unsigned long)rs->wheel_diam_mm,
                     (double)rs->alpha, (unsigned long)rs->debounce_ms,
                     rs->sim_on ? "true" : "false",
                     (double)rs->sim_rpm[0], (double)rs->sim_rpm[1],
-                    (double)rs->sim_rpm[2], (double)rs->sim_rpm[3]);
+                    (double)rs->sim_rpm[2], (double)rs->sim_rpm[3],
+                    (double)rs->gear_ratio[0], (double)rs->gear_ratio[1],
+                    (double)rs->gear_ratio[2], (double)rs->gear_ratio[3]);
 
 #undef RENDER_SNPRINTF
 

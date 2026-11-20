@@ -23,6 +23,11 @@ static void test_defaults(void)
         TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, cfg.sim_rpm[i]);
     }
     TEST_ASSERT_EQUAL_INT(0, cfg.debounce_ms);
+    /* 齿轮比默认按本车装法：前 2.0（半轴侧、门桥 2:1 之前），后 1.0 */
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.0f, cfg.gear_ratio[0]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.0f, cfg.gear_ratio[1]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, cfg.gear_ratio[2]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, cfg.gear_ratio[3]);
 }
 
 /* 2. 合法边界接受、非法拒绝 */
@@ -56,6 +61,20 @@ static void test_bounds(void)
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "alpha"));
     cfg.alpha = 1.01f;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "alpha"));
+
+    cfg.gear_ratio[0] = 2.0f;
+    cfg.gear_ratio[1] = 1.0f;
+    cfg.gear_ratio[2] = 1.0f;
+    cfg.gear_ratio[3] = 1.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "gear_ratio"));
+    cfg.gear_ratio[1] = 0.1f;
+    cfg.gear_ratio[2] = 20.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_validate(&cfg, "gear_ratio"));
+    cfg.gear_ratio[3] = 0.0f;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "gear_ratio"));
+    cfg.gear_ratio[3] = 1.0f;
+    cfg.gear_ratio[2] = 20.1f;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, cfg_params_validate(&cfg, "gear_ratio"));
 }
 
 /* 3. 逐字段判定：多字段输入时各字段独立判定并报告非法字段（命令层决定整条拒绝） */
@@ -88,6 +107,8 @@ static void test_pack_unpack_roundtrip(void)
     a.sim_on = true;
     a.sim_rpm[3] = 1234.5f;
     a.debounce_ms = 20;
+    a.gear_ratio[0] = 2.08f;
+    a.gear_ratio[3] = 0.5f;
 
     uint8_t blob[CFG_PARAMS_BLOB_SIZE];
     TEST_ASSERT_EQUAL_INT(ESP_OK, cfg_params_pack(&a, blob, sizeof(blob)));
@@ -99,6 +120,7 @@ static void test_pack_unpack_roundtrip(void)
     for (int i = 0; i < 4; i++) {
         TEST_ASSERT_EQUAL_INT(a.wheel_enabled[i], b.wheel_enabled[i]);
         TEST_ASSERT_FLOAT_WITHIN(0.0001f, a.sim_rpm[i], b.sim_rpm[i]);
+        TEST_ASSERT_FLOAT_WITHIN(0.0001f, a.gear_ratio[i], b.gear_ratio[i]);
     }
     TEST_ASSERT_EQUAL_INT(a.sim_on, b.sim_on);
     TEST_ASSERT_EQUAL_INT(a.debounce_ms, b.debounce_ms);
@@ -300,6 +322,11 @@ static void test_v1_blob_migrates(void)
     TEST_ASSERT_TRUE(cfg.sim_on);
     TEST_ASSERT_FLOAT_WITHIN(0.0001f, 30.0f, cfg.sim_rpm[2]);
     TEST_ASSERT_EQUAL_INT(25, cfg.debounce_ms);
+    /* v8 字段取默认（前 2.0 / 后 1.0），不是零值 */
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.0f, cfg.gear_ratio[0]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.0f, cfg.gear_ratio[1]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, cfg.gear_ratio[2]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, cfg.gear_ratio[3]);
 
     cfg_params_t def;
     cfg_params_default(&def);
@@ -384,7 +411,7 @@ static void test_unpack_rejects_bad_len_and_version(void)
 
     blob[0] = 0;
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
-    blob[0] = 8; /* 比当前版本（v7）更新 → 认不出来，拒绝 */
+    blob[0] = 9; /* 比当前版本（v8）更新 → 认不出来，拒绝 */
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_VERSION, cfg_params_unpack(blob, sizeof(blob), &cfg));
 
     /* v1 版本号但只有 31 字节：残缺，拒绝 */

@@ -126,7 +126,7 @@ static void ws_client_unregister(int fd)
 
 static esp_err_t handle_set_cfg(const char *payload)
 {
-    /* 解析 JSON：magnets/diam_mm/alpha/en/sim/sim_rpm/debounce_ms */
+    /* 解析 JSON：magnets/diam_mm/alpha/en/sim/sim_rpm/debounce_ms/gear_ratio */
     /* 使用 cJSON 解析 */
     cJSON *root = cJSON_Parse(payload);
     if (root == NULL) {
@@ -223,6 +223,25 @@ static esp_err_t handle_set_cfg(const char *payload)
                         next.sim_rpm[i] = (float)item->valuedouble;
                     }
                 }
+            }
+            changed = true;
+            wheel_cfg_changed = true;
+        }
+    }
+    if ((j = cJSON_GetObjectItemCaseSensitive(root, "gear_ratio"))) {
+        if (cJSON_IsArray(j)) {
+            for (int i = 0; i < WHEEL_COUNT; i++) {
+                if (i < cJSON_GetArraySize(j)) {
+                    cJSON *item = cJSON_GetArrayItem(j, i);
+                    if (cJSON_IsNumber(item)) {
+                        next.gear_ratio[i] = (float)item->valuedouble;
+                    }
+                }
+            }
+            if (cfg_params_validate(&next, "gear_ratio") != ESP_OK) {
+                err_msg = "gear_ratio out of range";
+                result = ESP_ERR_INVALID_ARG;
+                goto done;
             }
             changed = true;
             wheel_cfg_changed = true;

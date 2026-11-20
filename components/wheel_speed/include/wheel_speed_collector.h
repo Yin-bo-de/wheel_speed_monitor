@@ -26,6 +26,9 @@ extern "C" {
 typedef struct {
     uint32_t window_ms;     /* 采样窗口时长（毫秒），仅用于去抖判定 */
     uint32_t magnets;       /* 每转磁铁数，>= 1 */
+    float gear_ratio;       /* 传感器轴转速÷轮速（门桥/齿轮减速比）；
+                             * RPM 按 magnets×gear_ratio 折算到轮侧；
+                             * 传感器直接装在轮上填 1.0 */
     uint32_t wheel_diam_mm; /* 轮径，毫米 */
     float alpha;            /* EMA 系数 0..1，越大越灵敏 */
     uint32_t debounce_ms;   /* 最小脉冲间隔去抖；0=关闭（高于此值认为同窗口内多余脉冲无效） */
@@ -72,7 +75,7 @@ void wheel_chan_reset_baseline(wheel_chan_state_t *st, uint16_t current_counter)
 
 /*
  * 脉冲间隔测频法：interval_us 为相邻两次脉冲的时间间隔（微秒）。
- * 频率 = 1e6/interval_us（Hz），RPM = 频率×60/磁铁数，走 EMA。
+ * 频率 = 1e6/interval_us（Hz），RPM = 频率×60/(磁铁数×齿轮比)，走 EMA。
  * 间隔为 0 返回 ESP_ERR_INVALID_ARG 且状态不变。
  *
  * 间隔切分合并（防相机时钟耦合产生的假脉冲）：

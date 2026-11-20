@@ -10,6 +10,8 @@
  * v6（96B）在尾部追加打滑确认期（首次判定打滑后需连续满足多久才上锁）；
  * v7（112B）在尾部追加打牙防护双闸门（车速/速差阈值、同步稳定期）与手动
  * 闸门开关；
+ * v8（128B）在尾部追加每轮传感器齿轮比 gear_ratio[4]（传感器轴转速÷轮速，
+ * 门桥/齿轮减速比折算到轮侧）；
  * 解包按首字节版本号分派——旧 blob 仍可解，缺失字段取默认值（v2 还要按旧
  * 语义换算，见 cfg_params_unpack），上层解出后回写最新版，升级不丢用户已设的配置。
  */
@@ -32,6 +34,10 @@ extern "C" {
 
 #define CFG_MAGNETS_MIN 1
 #define CFG_MAGNETS_MAX 16
+/* 传感器齿轮比 = 传感器轴转速 ÷ 轮速。传感器装在轮子上（无减速）填 1.0；
+ * 装在门桥/齿轮减速之前（如半轴侧）填减速比。 */
+#define CFG_GEAR_RATIO_MIN 0.1f
+#define CFG_GEAR_RATIO_MAX 20.0f
 #define CFG_DIAM_MM_MIN 10
 #define CFG_DIAM_MM_MAX 300
 #define CFG_ALPHA_MIN 0.05f
@@ -99,10 +105,13 @@ extern "C" {
  *   v6 段 92..95：slip_confirm_ms(u32)
  *   v7 段 96..111：lock_max_speed_rpm(float) + lock_max_delta_rpm(float)
  *               + lock_sync_stable_ms(u32) + manual_gate_enable(1B) + 保留(3B)
+ *   v8 段 112..127：gear_ratio[4](float×4)
  * v2 段（32..71）与 v3 段是同义不同形：v2 用共享的 min/center/max + invert
  * 位图描述脉宽，v3 换成每通道两档，因此长 4 字节、其余字段偏移整体后移。 */
-#define CFG_PARAMS_BLOB_VERSION 7
-#define CFG_PARAMS_BLOB_SIZE 112
+#define CFG_PARAMS_BLOB_VERSION 8
+#define CFG_PARAMS_BLOB_SIZE 128
+#define CFG_PARAMS_BLOB_VERSION_7 7
+#define CFG_PARAMS_BLOB_SIZE_V7 112
 #define CFG_PARAMS_BLOB_VERSION_1 1
 #define CFG_PARAMS_BLOB_SIZE_V1 32
 #define CFG_PARAMS_BLOB_VERSION_2 2
@@ -165,14 +174,19 @@ typedef struct {
     float lock_max_delta_rpm;   /* 速差闸门：左右速差低于此值才允许锁 */
     uint32_t lock_sync_stable_ms; /* 双闸门连续满足多久才落锁；0=立即 */
     bool manual_gate_enable;    /* 手动模式锁止档命令同样过闸门 */
+
+    /* ---- v8：传感器齿轮比 ---- */
+    /* 传感器轴转速 ÷ 轮速。前轮磁铁在半轴侧、门桥齿轮之前时填减速比
+     * （本车前桥 2:1），RPM 按 magnets×gear_ratio 折算到轮侧。 */
+    float gear_ratio[CFG_WHEEL_COUNT];
 } cfg_params_t;
 
 void cfg_params_default(cfg_params_t *cfg);
 
 /* 校验单字段；字段名与 JSON 命令一致（magnets、diam、alpha、en、sim、
- * sim_rpm、debounce，以及 v2 的舵机与锁定策略各字段、v6 的 slip_confirm_ms，
- * 以及 v7 的 lock_max_speed_rpm / lock_max_delta_rpm / lock_sync_stable_ms，
- * 见上表）。
+ * sim_rpm、debounce、gear_ratio，以及 v2 的舵机与锁定策略各字段、
+ * v6 的 slip_confirm_ms，以及 v7 的 lock_max_speed_rpm / lock_max_delta_rpm /
+ * lock_sync_stable_ms，见上表）。
  * 未知字段返回 ESP_OK（命令层忽略）。
  * 跨字段约束（min<center<max、hold_max>=hold）随任一相关字段被写时一并检查，
  * 前端整组提交即保持一致。 */

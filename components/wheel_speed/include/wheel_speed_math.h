@@ -28,12 +28,14 @@ typedef struct {
 
 /*
  * 脉冲间隔测频：interval_us 为相邻两次脉冲间隔（微秒）。
- * 频率 = 1e6/interval_us，RPM = 频率×60/磁铁数，走 EMA。
- * 0 间隔返回 ESP_ERR_INVALID_ARG（不产生 NaN），状态不变。
+ * 频率 = 1e6/interval_us，RPM = 频率×60/当量磁铁数，走 EMA。
+ * magnets 为当量每转磁铁数 = 磁铁数×齿轮比（传感器轴转速÷轮速），
+ * 装在减速齿轮之前的传感器借此折算到轮侧。
+ * 0 间隔或 magnets<=0 返回 ESP_ERR_INVALID_ARG（不产生 NaN），状态不变。
  * now_ms 为当前单调毫秒时间，用于刷新 last_pulse_ms（供上层静止判定）。
  */
 esp_err_t wsmath_update_period(wsmath_state_t *st, uint32_t interval_us,
-                               uint32_t magnets, uint32_t wheel_diam_mm,
+                               float magnets, uint32_t wheel_diam_mm,
                                float alpha, uint32_t now_ms);
 
 #ifdef __cplusplus

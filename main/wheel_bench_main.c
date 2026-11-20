@@ -56,7 +56,7 @@ static const char *TAG = "wheelbench";
 static cfg_params_t s_cfg;
 static SemaphoreHandle_t s_cfg_mutex;
 static wheel_unit_t s_units[WHEEL_COUNT];
-static wheel_chan_cfg_t s_chan_cfg;
+static wheel_chan_cfg_t s_chan_cfg[WHEEL_COUNT];
 
 /* ---- 舵机控制链状态 ----
  * 全部只由 sampler_task 写（启动时的初始化除外，那时任务还没起来）。
@@ -106,12 +106,15 @@ static bool s_ledc_failed; /* 初始化失败过：不每 50ms 重试刷日志�
 
 esp_err_t wheel_bench_apply_config(const cfg_params_t *cfg)
 {
-    wheel_chan_cfg_t *cc = &s_chan_cfg;
-    cc->window_ms = WHEEL_SAMPLE_MS;
-    cc->magnets = cfg->magnets;
-    cc->wheel_diam_mm = cfg->wheel_diam_mm;
-    cc->alpha = cfg->alpha;
-    cc->debounce_ms = cfg->debounce_ms;
+    for (int i = 0; i < WHEEL_COUNT; i++) {
+        wheel_chan_cfg_t *cc = &s_chan_cfg[i];
+        cc->window_ms = WHEEL_SAMPLE_MS;
+        cc->magnets = cfg->magnets;
+        cc->gear_ratio = cfg->gear_ratio[i];
+        cc->wheel_diam_mm = cfg->wheel_diam_mm;
+        cc->alpha = cfg->alpha;
+        cc->debounce_ms = cfg->debounce_ms;
+    }
 
     /* 换源/启停变更会改变基准，重置避免毛刺 */
     for (int i = 0; i < WHEEL_COUNT; i++) {
@@ -141,16 +144,19 @@ static esp_err_t wheel_collector_sample(void *ctx, uint32_t now_ms)
             continue;
         }
         if (s_cfg.sim_on) {
-            /* 模拟源：sim_source 产出跨窗口正确间隔，与真实源走同一间隔法链 */
-            sim_source_set_target_rpm(&s_units[i].sim, (uint8_t)i, s_cfg.sim_rpm[i]);
+            /* 模拟源：sim_source 产出跨窗口正确间隔，与真实源走同一间隔法链。
+             * sim 的 rpm 是脉冲侧（1 磁铁假设），目标按齿轮比放大后
+             * 显示轮速才等于 sim_rpm。 */
+            sim_source_set_target_rpm(&s_units[i].sim, (uint8_t)i,
+                                      s_cfg.sim_rpm[i] * s_cfg.gear_ratio[i]);
             sim_source_step(&s_units[i].sim, WHEEL_SAMPLE_MS);
             uint32_t interval_us = sim_source_period_us(&s_units[i].sim, (uint8_t)i);
             if (interval_us > 0) {
-                wheel_chan_sample_period(&s_units[i].chan, &s_chan_cfg, interval_us, now_ms);
+                wheel_chan_sample_period(&s_units[i].chan, &s_chan_cfg[i], interval_us, now_ms);
             }
             uint16_t c = sim_source_counter(&s_units[i].sim, (uint8_t)i);
             /* sample 只累计脉冲 + 静止归零兜底，不计算频率 */
-            wheel_chan_sample(&s_units[i].chan, &s_chan_cfg, c, now_ms);
+            wheel_chan_sample(&s_units[i].chan, &s_chan_cfg[i], c, now_ms);
         } else {
             /* 真实源：先间隔法（更新频率/RPM/EMA），再 sample（累计+静止归零）。
              * 计数用 ISR 维护的有效计数（去抖后），避免 PCNT 原始计数
@@ -158,11 +164,11 @@ static esp_err_t wheel_collector_sample(void *ctx, uint32_t now_ms)
             uint32_t interval_us = 0;
             wheel_sensor_get_period_us((uint8_t)i, &interval_us);
             if (interval_us > 0) {
-                wheel_chan_sample_period(&s_units[i].chan, &s_chan_cfg, interval_us, now_ms);
+                wheel_chan_sample_period(&s_units[i].chan, &s_chan_cfg[i], interval_us, now_ms);
             }
             uint16_t c = 0;
             wheel_sensor_get_valid_count((uint8_t)i, &c);
-            wheel_chan_sample(&s_units[i].chan, &s_chan_cfg, c, now_ms);
+            wheel_chan_sample(&s_units[i].chan, &s_chan_cfg[i], c, now_ms);
         }
     }
     return ESP_OK;
@@ -511,6 +517,7 @@ static void ws_push_task(void *arg)
         d->sim_on = s_cfg.sim_on;
         for (int j = 0; j < WHEEL_COUNT; j++) {
             d->sim_rpm[j] = s_cfg.sim_rpm[j];
+            d->gear_ratio[j] = s_cfg.gear_ratio[j];
         }
         for (int i = 0; i < WHEEL_COUNT; i++) {
             wheel_unit_t *u = &s_units[i];
@@ -630,11 +637,14 @@ void app_main(void)
              (unsigned long)cfg.overlay_mask);
 
     /* collector 配置快照 */
-    s_chan_cfg.window_ms = WHEEL_SAMPLE_MS;
-    s_chan_cfg.magnets = cfg.magnets;
-    s_chan_cfg.wheel_diam_mm = cfg.wheel_diam_mm;
-    s_chan_cfg.alpha = cfg.alpha;
-    s_chan_cfg.debounce_ms = cfg.debounce_ms;
+    for (int i = 0; i < WHEEL_COUNT; i++) {
+        s_chan_cfg[i].window_ms = WHEEL_SAMPLE_MS;
+        s_chan_cfg[i].magnets = cfg.magnets;
+        s_chan_cfg[i].gear_ratio = cfg.gear_ratio[i];
+        s_chan_cfg[i].wheel_diam_mm = cfg.wheel_diam_mm;
+        s_chan_cfg[i].alpha = cfg.alpha;
+        s_chan_cfg[i].debounce_ms = cfg.debounce_ms;
+    }
 
     static const uint8_t hall_gpios[WHEEL_COUNT] = {
         WHEEL_HALL_GPIO_LF, WHEEL_HALL_GPIO_RF, WHEEL_HALL_GPIO_LR, WHEEL_HALL_GPIO_RR,
