@@ -236,6 +236,14 @@
       <div><label>EMA 系数</label><input id="alpha" type="number" min="0.05" max="1" step="0.05" value="0.3"></div>
       <div><label>去抖(ms)</label><input id="debounce" type="number" min="0" max="1000" value="0"></div>
     </div>
+    <div class="cfg-grid">
+      <div><label>齿轮比 左前</label><input id="gear0" type="number" min="0.1" max="20" step="0.01" value="2"></div>
+      <div><label>齿轮比 右前</label><input id="gear1" type="number" min="0.1" max="20" step="0.01" value="2"></div>
+      <div><label>齿轮比 左后</label><input id="gear2" type="number" min="0.1" max="20" step="0.01" value="1"></div>
+      <div><label>齿轮比 右后</label><input id="gear3" type="number" min="0.1" max="20" step="0.01" value="1"></div>
+    </div>
+    <p class="hint">齿轮比 = 传感器轴转速 ÷ 轮速。磁铁装在门桥/齿轮减速之前（如半轴侧）填减速比，
+      直接装在轮毂结合器（跟轮子同速）填 1。</p>
     <div style="margin-top:8px">
       <button id="cfg-apply">应用配置</button>
       <button id="reset-counts">清零累计</button>
@@ -669,6 +677,7 @@ function renderWheels(wheels) {
     echoNum($("diam"), cfg.diam_mm ?? 105);
     echoNum($("alpha"), cfg.alpha ?? 0.3);
     echoNum($("debounce"), cfg.debounce_ms ?? 0);
+    cfg.gear_ratio && cfg.gear_ratio.forEach((v, i) => echoNum($("gear" + i), v));
     /* 启用状态挂在每轮上（wheels[i].en），不在 cfg 块里——cfg 只回显标量配置 */
     wheels.wheels.forEach((w, i) => echoChk($("en" + i), w.en));
   }
@@ -1959,6 +1968,7 @@ function applyCfg() {
     diam_mm: parseInt($("diam").value, 10),
     alpha: parseFloat($("alpha").value),
     debounce_ms: parseInt($("debounce").value, 10),
+    gear_ratio: [0, 1, 2, 3].map(i => parseFloat($("gear" + i).value) || 1),
     en: [0, 1, 2, 3].map(i => $("en" + i).checked),
   });
   dirty.cfg = false;

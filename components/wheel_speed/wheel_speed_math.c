@@ -4,16 +4,16 @@
 #include "wheel_speed_math.h"
 
 esp_err_t wsmath_update_period(wsmath_state_t *st, uint32_t interval_us,
-                               uint32_t magnets, uint32_t wheel_diam_mm,
+                               float magnets, uint32_t wheel_diam_mm,
                                float alpha, uint32_t now_ms)
 {
-    if (magnets == 0 || interval_us == 0) {
+    if (magnets <= 0.0f || interval_us == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
     /* 频率 = 1/interval；1e6us = 1s，直接反映每秒转圈数 */
     const float freq_hz = 1000000.0f / (float)interval_us;
-    const float raw_rpm = freq_hz * 60.0f / (float)magnets;
+    const float raw_rpm = freq_hz * 60.0f / magnets;
     const float raw_speed_cm_s = raw_rpm * (float)M_PI * (float)wheel_diam_mm / 600.0f;
     const float raw_speed_km_h = raw_speed_cm_s * 3.6f / 100.0f;
 

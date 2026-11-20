@@ -14,6 +14,12 @@ void cfg_params_default(cfg_params_t *cfg)
     }
     cfg->sim_on = false;
     cfg->debounce_ms = 0;
+    /* 齿轮比默认按本车装法：前轮磁铁在半轴侧（门桥 2:1 减速之前）填 2.0，
+     * 后轮磁铁在轮毂结合器（减速之后）填 1.0。换装法在设置页改。 */
+    cfg->gear_ratio[0] = 2.0f;
+    cfg->gear_ratio[1] = 2.0f;
+    cfg->gear_ratio[2] = 1.0f;
+    cfg->gear_ratio[3] = 1.0f;
 
     cfg->servo_sim = true;
     for (int i = 0; i < CFG_SERVO_COUNT; i++) {
@@ -184,6 +190,14 @@ esp_err_t cfg_params_validate(const cfg_params_t *cfg, const char *field)
          * "勾选项存在但没人画"的静默不一致。 */
         if ((cfg->overlay_mask & ~CFG_CAM_OVERLAY_ALL) != 0) {
             return ESP_ERR_INVALID_ARG;
+        }
+    } else if (strcmp(field, "gear_ratio") == 0) {
+        /* 逐元素判边界，一轮填错不牵连其他轮 */
+        for (int i = 0; i < CFG_WHEEL_COUNT; i++) {
+            if (cfg->gear_ratio[i] < CFG_GEAR_RATIO_MIN ||
+                cfg->gear_ratio[i] > CFG_GEAR_RATIO_MAX) {
+                return ESP_ERR_INVALID_ARG;
+            }
         }
     }
     /* en/sim/sim_rpm/servo_en 为 bool 数组，JSON 解析层负责类型约束 */
@@ -405,6 +419,20 @@ static void unpack_v7_segment(const uint8_t *buf, cfg_params_t *out)
     out->manual_gate_enable = buf[108] != 0;
 }
 
+/* ---- v8 段（112..127）：传感器齿轮比 ----
+ * 追加在 v7 段之后，旧段偏移一个字节都不动：旧固件写的 blob 照常解出，
+ * 齿轮比保持默认（前 2.0 / 后 1.0，见 cfg_params_default）。 */
+
+static void pack_v8_segment(const cfg_params_t *cfg, uint8_t *buf)
+{
+    memcpy(buf + 112, cfg->gear_ratio, sizeof(cfg->gear_ratio));
+}
+
+static void unpack_v8_segment(const uint8_t *buf, cfg_params_t *out)
+{
+    memcpy(out->gear_ratio, buf + 112, sizeof(out->gear_ratio));
+}
+
 esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
 {
     if (cfg == NULL || buf == NULL || len < CFG_PARAMS_BLOB_SIZE) {
@@ -417,6 +445,7 @@ esp_err_t cfg_params_pack(const cfg_params_t *cfg, uint8_t *buf, size_t len)
     pack_v5_segment(cfg, buf);
     pack_v6_segment(cfg, buf);
     pack_v7_segment(cfg, buf);
+    pack_v8_segment(cfg, buf);
     return ESP_OK;
 }
 
@@ -483,6 +512,18 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v6_segment(buf, out);
         return ESP_OK; /* 闸门字段保持默认；上层随后回写 v7 */
     }
+    if (buf[0] == CFG_PARAMS_BLOB_VERSION_7) {
+        if (len < CFG_PARAMS_BLOB_SIZE_V7) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        unpack_v1_segment(buf, out);
+        unpack_v3_segment(buf, out);
+        unpack_v4_segment(buf, out);
+        unpack_v5_segment(buf, out);
+        unpack_v6_segment(buf, out);
+        unpack_v7_segment(buf, out);
+        return ESP_OK; /* 齿轮比保持默认；上层随后回写 v8 */
+    }
     if (buf[0] == CFG_PARAMS_BLOB_VERSION) {
         if (len < CFG_PARAMS_BLOB_SIZE) {
             return ESP_ERR_INVALID_ARG;
@@ -493,6 +534,7 @@ esp_err_t cfg_params_unpack(const uint8_t *buf, size_t len, cfg_params_t *out)
         unpack_v5_segment(buf, out);
         unpack_v6_segment(buf, out);
         unpack_v7_segment(buf, out);
+        unpack_v8_segment(buf, out);
         return ESP_OK;
     }
     return ESP_ERR_INVALID_VERSION;

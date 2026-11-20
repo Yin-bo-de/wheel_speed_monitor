@@ -59,7 +59,7 @@ static void pending_expire_if_needed(wheel_chan_state_t *st, uint32_t now_ms)
 esp_err_t wheel_chan_sample(wheel_chan_state_t *st, const wheel_chan_cfg_t *cfg,
                             uint16_t new_counter, uint32_t now_ms)
 {
-    if (cfg->magnets == 0 || cfg->window_ms == 0) {
+    if (cfg->magnets == 0 || cfg->gear_ratio <= 0.0f || cfg->window_ms == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -142,7 +142,7 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
         st->math.last_pulse_ms = now_ms;
         if (st->last_valid_interval_us != 0) {
             (void)wsmath_update_period(&st->math, st->last_valid_interval_us,
-                                       cfg->magnets, cfg->wheel_diam_mm,
+                                       cfg->magnets * cfg->gear_ratio, cfg->wheel_diam_mm,
                                        cfg->alpha, now_ms);
         }
         return ESP_OK;
@@ -205,7 +205,7 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
             st->suspect_count++;
             st->last_valid_interval_us = (uint32_t)merged;
             /* prev 不变：回滚后上上段仍是后续修正的参照 */
-            return wsmath_update_period(&st->math, (uint32_t)merged, cfg->magnets,
+            return wsmath_update_period(&st->math, (uint32_t)merged, cfg->magnets * cfg->gear_ratio,
                                         cfg->wheel_diam_mm, cfg->alpha, now_ms);
         }
 
@@ -235,7 +235,7 @@ esp_err_t wheel_chan_sample_period(wheel_chan_state_t *st, const wheel_chan_cfg_
 
     /* 频率 = 1/间隔；间隔法直接反映两次脉冲真实距离，
      * 低速（1Hz 级）也能准确测频，无窗口法的量化跳变。 */
-    return wsmath_update_period(&st->math, report_us, cfg->magnets,
+    return wsmath_update_period(&st->math, report_us, cfg->magnets * cfg->gear_ratio,
                                 cfg->wheel_diam_mm, cfg->alpha, now_ms);
 }
 

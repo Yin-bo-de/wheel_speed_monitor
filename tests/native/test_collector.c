@@ -18,6 +18,7 @@ static void fresh(void)
     memset(&cfg, 0, sizeof(cfg));
     cfg.window_ms = 50;
     cfg.magnets = 1;
+    cfg.gear_ratio = 1.0f;
     cfg.wheel_diam_mm = 100;
     cfg.alpha = 0.3f;
     cfg.debounce_ms = 0;
@@ -150,6 +151,17 @@ static void test_period_measurement_fast(void)
     wheel_chan_sample_period(&st, &cfg, 100001u, 1050); /* 上报，直采 EMA */
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 10.0f, st.math.freq_hz);
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 600.0f, st.math.rpm_ema);
+}
+
+/* 10.1 齿轮比折算：传感器在减速齿轮之前（齿轮比 2）→ 轮速读数减半 */
+static void test_gear_ratio_scales_rpm(void)
+{
+    fresh();
+    cfg.gear_ratio = 2.0f;
+    wheel_chan_sample_period(&st, &cfg, 100000u, 1000); /* 首样本挂起 */
+    wheel_chan_sample_period(&st, &cfg, 100001u, 1050); /* 上报，直采 EMA */
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 10.0f, st.math.freq_hz);  /* 信号频率不变 */
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, 300.0f, st.math.rpm_ema); /* 600 ÷ 2 */
 }
 
 /* 11. 间隔为零（中断异常/未检测）→ 返回错误且不产生 NaN */
@@ -604,6 +616,7 @@ NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_reset_counts, "test_reset_counts", __LINE__);
     UnityDefaultTestRun(test_period_measurement_freq, "test_period_measurement_freq", __LINE__);
     UnityDefaultTestRun(test_period_measurement_fast, "test_period_measurement_fast", __LINE__);
+    UnityDefaultTestRun(test_gear_ratio_scales_rpm, "test_gear_ratio_scales_rpm", __LINE__);
     UnityDefaultTestRun(test_period_zero_interval, "test_period_zero_interval", __LINE__);
     UnityDefaultTestRun(test_idle_timeout_zeroes, "test_idle_timeout_zeroes", __LINE__);
     UnityDefaultTestRun(test_revive_after_idle, "test_revive_after_idle", __LINE__);

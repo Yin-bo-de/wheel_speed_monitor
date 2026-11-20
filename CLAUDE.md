@@ -20,6 +20,7 @@ ctest --test-dir tests/native/build --output-on-failure
 - `main/idf_component.yml` 钉住 `espressif/esp32-camera`；首次构建需要联网拉
   `managed_components/`（已 gitignore）。PSRAM（octal/80MHz）与 `CAMERA_CORE1`
   固化在 `sdkconfig.defaults`，相机缓冲走 PSRAM。
+- 每次代码变更后，CMakeLists.txt中的“PROJECT_VER”必须加0.0.1；当有重大变更时，如新增模块、新增配置项等，必须加0.1.0。
 
 ## 代码组织纪律
 
