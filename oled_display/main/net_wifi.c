@@ -51,9 +51,8 @@ esp_err_t net_wifi_start(const dev_cfg_t *cfg)
     /* AP 网段不能沿用默认的 192.168.4.x：STA 常连的车端热点就在
      * 那个网段，撞上后 C3 两个接口同网段、lwIP 路由会乱。 */
     esp_netif_ip_info_t ap_ip = {0};
-    if (!esp_netif_str_to_ip4(NET_WIFI_AP_IP, &ap_ip.ip)) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    ESP_RETURN_ON_ERROR(esp_netif_str_to_ip4(NET_WIFI_AP_IP, &ap_ip.ip), TAG,
+                        "ap ip parse");
     ap_ip.netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0);
     ap_ip.gw = ap_ip.ip;
     ESP_RETURN_ON_ERROR(esp_netif_dhcps_stop(ap_netif), TAG, "dhcps stop");
