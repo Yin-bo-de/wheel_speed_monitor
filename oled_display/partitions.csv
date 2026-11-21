@@ -1,0 +1,9 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# ESP32-C3 SuperMini 4MB flash。双 OTA 分区交替写入，新固件起不来由
+# bootloader 自动回滚上一版（CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE）。
+# 单块 0x1E0000（1875KB），本项目固件约 1.2MB，余量充足。
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xF000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+ota_0,    app,  ota_0,   0x20000,  0x1E0000,
+ota_1,    app,  ota_1,   0x200000, 0x1E0000,

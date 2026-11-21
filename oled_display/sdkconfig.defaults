@@ -1,0 +1,18 @@
+# ESP32-C3 SuperMini 板载 4MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# 用工程根目录的 partitions.csv（双 OTA 分区），不带这两项 IDF 会用
+# 默认单 app 分区表，OTA 没有备用分区
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# 双分区回滚：新固件以 pending 状态启动，确认可用前崩溃会被 bootloader
+# 自动回退上一版（与车端 OTA 同机制）
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# app_main 里串行做 NVS/WiFi/OLED/HTTP 初始化，栈给足
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# httpd 端点：页面 1 + 配置 2 + OTA 3 = 6 个，默认 8 个槽位够用，
+# 显式钉住避免 IDF 默认值漂移
+CONFIG_HTTPD_MAX_URI_HANDLERS=8
