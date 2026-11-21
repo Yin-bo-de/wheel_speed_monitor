@@ -57,7 +57,8 @@ static void display_task(void *arg)
             ui_info_t info = {
                 .ip = (ip[0] != '\0') ? ip : NULL,
                 .version = desc->version,
-                .wifi_ssid = s_cfg.wifi_ssid,
+                .ap_ssid = NET_WIFI_AP_SSID,
+                .ap_ip = NET_WIFI_AP_IP,
                 .diam_mm = dev_cfg_diam_mm(&s_cfg),
                 .disconnect_ms = s_cfg.disconnect_ms,
             };

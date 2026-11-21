@@ -90,7 +90,8 @@ static void test_info_page_lines(void)
     ui_info_t info = {
         .ip = "192.168.2.10",
         .version = "0.1.0",
-        .wifi_ssid = "my-hotspot",
+        .ap_ssid = "oled-setup",
+        .ap_ip = "192.168.7.1",
         .diam_mm = 66.0f,
         .disconnect_ms = 2000,
     };

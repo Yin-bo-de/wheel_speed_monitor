@@ -256,22 +256,21 @@ void ui_render_info(const ui_info_t *info, uint8_t fb[UI_FB_SIZE])
 
     draw_text(fb, 0, 4, "OLED SPEED MONITOR");
 
-    if (info->ip != NULL) {
-        snprintf(line, sizeof(line), "IP  %s", info->ip);
-    } else {
-        snprintf(line, sizeof(line), "IP  (waiting)");
-    }
+    snprintf(line, sizeof(line), "AP  %s",
+             (info->ap_ssid != NULL) ? info->ap_ssid : "");
     draw_text_n(fb, 0, 16, line, 21);
 
-    snprintf(line, sizeof(line), "WIFI %s",
-             (info->wifi_ssid != NULL) ? info->wifi_ssid : "");
+    snprintf(line, sizeof(line), "CFG %s",
+             (info->ap_ip != NULL) ? info->ap_ip : "");
     draw_text_n(fb, 0, 28, line, 21);
 
     snprintf(line, sizeof(line), "D %.1fmm DIS %.1fs",
              (double)info->diam_mm, (double)info->disconnect_ms / 1000.0);
     draw_text_n(fb, 0, 40, line, 21);
 
-    snprintf(line, sizeof(line), "VER %s",
-             (info->version != NULL) ? info->version : "");
+    /* 版本和 STA IP 并一行：IP 没拿到就显示 (waiting)，现场看连接状态 */
+    snprintf(line, sizeof(line), "V%s %s",
+             (info->version != NULL) ? info->version : "",
+             (info->ip != NULL) ? info->ip : "(waiting)");
     draw_text_n(fb, 0, 52, line, 21);
 }

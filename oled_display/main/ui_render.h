@@ -29,9 +29,10 @@ typedef struct {
 } ui_view_t;
 
 typedef struct {
-    const char *ip;   /* NULL = 尚未拿到 IP */
+    const char *ip;   /* STA IP，NULL = 尚未拿到 */
     const char *version;
-    const char *wifi_ssid;
+    const char *ap_ssid; /* 配置热点名：手机直连的入口 */
+    const char *ap_ip;   /* 配置热点固定地址 */
     float diam_mm;
     uint32_t disconnect_ms;
 } ui_info_t;
