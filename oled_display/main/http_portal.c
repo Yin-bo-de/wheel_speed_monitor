@@ -198,6 +198,9 @@ esp_err_t http_portal_start(const dev_cfg_t *cfg)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     /* 端点：页面 1 + 配置 2 + OTA 3 = 6，默认槽位 8，显式钉住防默认值漂移 */
     config.max_uri_handlers = 8;
+    /* OTA 上传处理链（esp_ota_write + cJSON 应答）都在 httpd 任务里跑，
+     * 默认栈 4096 太紧，车端实践 8192 */
+    config.stack_size = 8192;
     httpd_handle_t hd = NULL;
     ESP_RETURN_ON_ERROR(httpd_start(&hd, &config), TAG, "httpd start");
 

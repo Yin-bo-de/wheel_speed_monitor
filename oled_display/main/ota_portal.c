@@ -210,6 +210,7 @@ static esp_err_t handle_upload(httpd_req_t *req)
     }
 
     size_t received = 0;
+    size_t next_log = 256 * 1024;
     int timeouts = 0;
     const char *fail_msg = NULL;
     TickType_t started = xTaskGetTickCount();
@@ -238,6 +239,11 @@ static esp_err_t handle_upload(httpd_req_t *req)
             break;
         }
         received += (size_t)r;
+        if (received >= next_log) {
+            ESP_LOGI(TAG, "ota %lu/%lu", (unsigned long)received,
+                     (unsigned long)content_len);
+            next_log += 256 * 1024;
+        }
     }
     if (fail_msg == NULL && received != content_len) {
         fail_msg = "incomplete upload";

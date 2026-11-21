@@ -72,6 +72,11 @@
 <script>
 const $ = (id) => document.getElementById(id);
 
+/* 表单被用户改过就不再自动回填：3 秒轮询抢在点「保存」之前把旧值
+ * 刷回去，会把刚填的配置顶掉（真机踩过），回填只在没动过时做 */
+let cfgTouched = false;
+$("cfgForm").addEventListener("input", () => { cfgTouched = true; });
+
 async function loadInfo() {
   try {
     const r = await fetch("/api/info");
@@ -84,7 +89,7 @@ async function loadInfo() {
     } else {
       $("link").textContent = "还没收到数据";
     }
-    if (document.activeElement.tagName !== "INPUT") {
+    if (!cfgTouched) {
       $("ssid").value = d.cfg.ssid;
       $("pass").value = d.cfg.pass;
       $("server_uri").value = d.cfg.server_uri;
@@ -120,7 +125,7 @@ async function saveCfg(ev) {
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || "保存失败");
     msg.className = "msg ok";
-    msg.textContent = "保存成功，设备正在重启。等它连上 WiFi 再点刷新。";
+    msg.textContent = "已保存（WiFi: " + body.ssid + "），设备正在重启。等它连上 WiFi 再点刷新。";
   } catch (e) {
     msg.className = "msg err";
     msg.textContent = e.message;
@@ -166,9 +171,10 @@ function doOta() {
   $("otaBtn").disabled = true;
   msg.className = "msg";
   msg.textContent = "上传中……";
-  const fd = new FormData();
-  fd.append("firmware", f, f.name);
-  xhr.send(fd);
+  /* 直接发原始文件字节：FormData 的 multipart 信封会被当固件写进
+   * flash，镜像校验必挂，服务端按原始流收 */
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.send(f);
 }
 
 async function doRollback() {
