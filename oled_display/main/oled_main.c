@@ -85,9 +85,13 @@ static void display_task(void *arg)
                 v.speed_valid = speed_calc_kmh(&in, &v.speed_kmh);
                 v.mode_valid = st.view.has_mode;
                 v.mode_auto = st.view.mode_auto;
+                v.has_servo_cmd = st.view.has_servo_cmd;
                 for (int i = 0; i < TELEM_DIFF_COUNT; i++) {
                     v.phase[i] = st.view.phase[i];
                     v.phase_en[i] = st.view.phase_en[i];
+                    v.diff_target_us[i] = st.view.diff_target_us[i];
+                    v.diff_unlock_us[i] = st.view.diff_unlock_us[i];
+                    v.diff_lock_us[i] = st.view.diff_lock_us[i];
                 }
                 ui_render_main(&v, fb);
             }

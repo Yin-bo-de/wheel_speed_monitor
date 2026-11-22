@@ -61,6 +61,31 @@ static void test_parse_full_frame(void)
     TEST_ASSERT_EQUAL_INT(TELEM_PHASE_PENDING_SYNC, v.phase[1]);
     TEST_ASSERT_TRUE(v.phase_en[0]);
     TEST_ASSERT_FALSE(v.phase_en[1]);
+    TEST_ASSERT_TRUE(v.has_servo_cmd);
+}
+
+static void test_parse_servo_cmd_detents(void)
+{
+    static const char *frame =
+        "{\"type\":\"telemetry\",\"seq\":3,\"t\":0,\"collectors\":["
+        "{\"type\":\"servo\",\"src\":\"sim\",\"mode\":\"manual\",\"mode_src\":\"rc\","
+        "\"sim\":true,"
+        "\"servos\":["
+        "{\"i\":0,\"en\":true,\"phase\":\"idle\",\"hold_ms\":0,\"ratio\":0.0,"
+        "\"slip_left\":false,\"target_us\":1895,\"cur_us\":1895.0,\"reached\":true},"
+        "{\"i\":1,\"en\":true,\"phase\":\"pending_sync\",\"hold_ms\":0,\"ratio\":0.0,"
+        "\"slip_left\":false,\"target_us\":1100,\"cur_us\":1100.0,\"reached\":true}],"
+        "\"cfg\":{\"sim\":true,\"unlock_us\":[1100,1500],\"lock_us\":[1900,1900],"
+        "\"manual_us\":[1895,1500],\"mode\":\"manual\"}}]}";
+    telem_frame_view_t v;
+    TEST_ASSERT_TRUE(telem_frame_parse(frame, strlen(frame), &v));
+    TEST_ASSERT_TRUE(v.has_servo_cmd);
+    TEST_ASSERT_EQUAL_UINT16(1895, v.diff_target_us[0]);
+    TEST_ASSERT_EQUAL_UINT16(1100, v.diff_target_us[1]);
+    TEST_ASSERT_EQUAL_UINT16(1100, v.diff_unlock_us[0]);
+    TEST_ASSERT_EQUAL_UINT16(1500, v.diff_unlock_us[1]);
+    TEST_ASSERT_EQUAL_UINT16(1900, v.diff_lock_us[0]);
+    TEST_ASSERT_EQUAL_UINT16(1900, v.diff_lock_us[1]);
 }
 
 static void test_parse_wheel_only(void)
@@ -74,6 +99,7 @@ static void test_parse_wheel_only(void)
     TEST_ASSERT_TRUE(telem_frame_parse(frame, strlen(frame), &v));
     TEST_ASSERT_TRUE(v.has_wheel);
     TEST_ASSERT_FALSE(v.has_mode);
+    TEST_ASSERT_FALSE(v.has_servo_cmd);
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 40.0f, v.wheel_rpm[3]);
 }
 
@@ -115,6 +141,7 @@ static void test_phase_from_str(void)
 
 NATIVE_TEST_MAIN(
     UnityDefaultTestRun(test_parse_full_frame, "test_parse_full_frame", __LINE__);
+    UnityDefaultTestRun(test_parse_servo_cmd_detents, "test_parse_servo_cmd_detents", __LINE__);
     UnityDefaultTestRun(test_parse_wheel_only, "test_parse_wheel_only", __LINE__);
     UnityDefaultTestRun(test_parse_tolerates_new_fields, "test_parse_tolerates_new_fields", __LINE__);
     UnityDefaultTestRun(test_parse_bad_input, "test_parse_bad_input", __LINE__);

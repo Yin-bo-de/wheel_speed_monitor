@@ -26,6 +26,11 @@ typedef struct {
     bool mode_auto;
     telem_phase_t phase[TELEM_DIFF_COUNT];
     bool phase_en[TELEM_DIFF_COUNT];
+    /* 舵机指令与两档落点（µs）：手动模式下 phase 恒 idle，锁定与否看落点 */
+    bool has_servo_cmd;
+    uint16_t diff_target_us[TELEM_DIFF_COUNT];
+    uint16_t diff_unlock_us[TELEM_DIFF_COUNT];
+    uint16_t diff_lock_us[TELEM_DIFF_COUNT];
 } ui_view_t;
 
 typedef struct {

@@ -284,7 +284,27 @@ static void parse_wheel_block(const char *blk, const char *blk_end,
     out->has_wheel = true;
 }
 
-/* servo 块：顶层 mode（生效模式）+ servos[{i,en,phase}] */
+/* 两档落点 [a,b]（cfg.unlock_us / cfg.lock_us），供指令落点判定 */
+static void parse_us_pair(const char *obj, const char *end, const char *key,
+                          uint16_t out[TELEM_DIFF_COUNT])
+{
+    const char *arr = find_key(obj, end, key);
+    arr_walk_t w;
+    if (!arr_walk_init(&w, arr, end)) {
+        return;
+    }
+    const char *el, *el_end;
+    int i = 0;
+    while (i < TELEM_DIFF_COUNT && arr_walk_next(&w, &el, &el_end)) {
+        double d;
+        if (get_number(el, &d)) {
+            out[i] = (uint16_t)d;
+        }
+        i++;
+    }
+}
+
+/* servo 块：顶层 mode（生效模式）+ servos[{i,en,phase,target_us}] + cfg 两档落点 */
 static void parse_servo_block(const char *blk, const char *blk_end,
                               telem_frame_view_t *out)
 {
@@ -320,7 +340,18 @@ static void parse_servo_block(const char *blk, const char *blk_end,
         if (v != NULL && get_string(v, el_end, phase, sizeof(phase))) {
             out->phase[i] = telem_phase_from_str(phase);
         }
+        double us;
+        v = find_key(el, el_end, "target_us");
+        if (v != NULL && get_number(v, &us)) {
+            out->diff_target_us[i] = (uint16_t)us;
+        }
     }
+    const char *cfgv = find_key(blk, blk_end, "cfg");
+    if (cfgv != NULL) {
+        parse_us_pair(cfgv, blk_end, "unlock_us", out->diff_unlock_us);
+        parse_us_pair(cfgv, blk_end, "lock_us", out->diff_lock_us);
+    }
+    out->has_servo_cmd = true;
 }
 
 bool telem_frame_parse(const char *json, size_t len, telem_frame_view_t *out)

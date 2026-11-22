@@ -45,6 +45,12 @@ typedef struct {
     bool mode_auto;                        /* servo.mode："auto" / "manual" */
     telem_phase_t phase[TELEM_DIFF_COUNT]; /* servos[i].phase */
     bool phase_en[TELEM_DIFF_COUNT];       /* servos[i].en */
+    /* 舵机指令与两档落点（µs）：手动模式下状态机不跑、phase 恒 idle，
+     * 锁定与否要看 target_us 落在哪一档（与车端网页同一约定） */
+    bool has_servo_cmd;
+    uint16_t diff_target_us[TELEM_DIFF_COUNT]; /* servos[i].target_us */
+    uint16_t diff_unlock_us[TELEM_DIFF_COUNT]; /* servo cfg.unlock_us */
+    uint16_t diff_lock_us[TELEM_DIFF_COUNT];   /* servo cfg.lock_us */
 } telem_frame_view_t;
 
 /* 解析车端 telem_render_frame() 输出的下行遥测帧。

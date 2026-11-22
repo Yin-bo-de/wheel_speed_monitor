@@ -174,13 +174,36 @@ static int draw_text_scaled(uint8_t fb[UI_FB_SIZE], int x, int y,
     return w;
 }
 
-/* 差速四态 → 屏幕短标签（ASCII：屏上中文字库成本高，标签一眼可辨即可） */
-static const char *phase_label(bool en, telem_phase_t phase)
+/*落点判定容差：与车端 strategy.c 的 STRATEGY_DETENT_TOL_US、网页的
+ * DETENT_TOL_US 同一约定（±20µs），三方不一致屏幕和网页会打架 */
+#define UI_DETENT_TOL_US 20
+
+/* 差速四态 → 屏幕短标签（ASCII：屏上中文字库成本高，标签一眼可辨即可）。
+ * 手动模式下状态机不跑、phase 恒 idle，锁定与否看舵机指令落在哪一档；
+ * 判定顺序与车端网页一致：等待同步（打牙防护扣着锁止命令）优先，
+ * 其次锁定档/解锁档落点，行程中间报 MANUAL。 */
+static const char *phase_label(const ui_view_t *v, int i)
 {
-    if (!en) {
+    if (!v->phase_en[i]) {
         return "OFF";
     }
-    switch (phase) {
+    bool manual = v->mode_valid && !v->mode_auto;
+    if (manual && v->has_servo_cmd &&
+        v->diff_lock_us[i] != v->diff_unlock_us[i]) {
+        if (v->phase[i] == TELEM_PHASE_PENDING_SYNC) {
+            return "WAIT";
+        }
+        int d_lock = (int)v->diff_target_us[i] - (int)v->diff_lock_us[i];
+        int d_unlock = (int)v->diff_target_us[i] - (int)v->diff_unlock_us[i];
+        if (d_lock >= -UI_DETENT_TOL_US && d_lock <= UI_DETENT_TOL_US) {
+            return "LOCK";
+        }
+        if (d_unlock >= -UI_DETENT_TOL_US && d_unlock <= UI_DETENT_TOL_US) {
+            return "UNLOCK";
+        }
+        return "MANUAL";
+    }
+    switch (v->phase[i]) {
     case TELEM_PHASE_IDLE:
         return "UNLOCK";
     case TELEM_PHASE_PENDING_SYNC:
@@ -221,11 +244,9 @@ void ui_render_main(const ui_view_t *v, uint8_t fb[UI_FB_SIZE])
     draw_text(fb, 2 + w + 4, 22, "km/h");
 
     /* 状态区第 2/3 行：前/后差速四态 */
-    snprintf(line, sizeof(line), "F: %s",
-             phase_label(v->phase_en[0], v->phase[0]));
+    snprintf(line, sizeof(line), "F: %s", phase_label(v, 0));
     draw_text(fb, 0, 38, line);
-    snprintf(line, sizeof(line), "R: %s",
-             phase_label(v->phase_en[1], v->phase[1]));
+    snprintf(line, sizeof(line), "R: %s", phase_label(v, 1));
     draw_text(fb, 0, 48, line);
 }
 
