@@ -1,0 +1,32 @@
+menu "OLED 显示子项目"
+
+config OLED_WIFI_SSID
+    string "默认 WiFi SSID"
+    default "wheel-bench"
+    help
+        首次烧录的初始 WiFi 凭据，NVS 里存有配置后以 NVS 为准。
+        默认连车端开放热点 wheel-bench；验证时在配置页面改成电脑热点。
+
+config OLED_WIFI_PASS
+    string "默认 WiFi 密码"
+    default ""
+    help
+        车端热点是开放网络，密码留空。连加密热点时在配置页面设置。
+
+config OLED_WHEEL_DIAM_X10
+    int "默认轮胎直径（0.1mm）"
+    range 200 2000
+    default 660
+    help
+        车速换算用的轮胎直径，660 = 66.0mm。存 NVS 后以 NVS 为准，
+        配置页面的修改落在 NVS（与车端的轮径配置各配各的）。
+
+config OLED_DISCONNECT_MS
+    int "默认断开判定阈值（毫秒）"
+    range 500 10000
+    default 2000
+    help
+        连续多久收不到遥测帧判定断开、清屏出断开标记。现有帧 100ms 一推，
+        2 秒 = 连续 20 帧。存 NVS 后以 NVS 为准。
+
+endmenu

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OLED 轮速显示屏</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 0; padding: 16px; background: #f5f5f7; color: #1d1d1f; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  section { background: #fff; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 14px; }
+  .row span:first-child { color: #6e6e73; }
+  form label { display: block; font-size: 13px; color: #6e6e73; margin: 10px 0 2px; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; font-size: 15px; border: 1px solid #d2d2d7; border-radius: 8px; }
+  .hint { font-size: 12px; color: #86868b; margin-top: 2px; }
+  button { margin-top: 14px; padding: 10px 18px; font-size: 15px; border: 0; border-radius: 8px; background: #0071e3; color: #fff; }
+  button.gray { background: #86868b; }
+  button:disabled { opacity: .5; }
+  progress { width: 100%; margin-top: 10px; }
+  .msg { font-size: 13px; margin-top: 8px; min-height: 18px; }
+  .ok { color: #1a7f37; }
+  .err { color: #c0392b; }
+</style>
+</head>
+<body>
+<h1>OLED 轮速显示屏</h1>
+
+<section>
+  <h2>设备信息</h2>
+  <div class="row"><span>固件版本</span><b id="version">-</b></div>
+  <div class="row"><span>IP 地址</span><b id="ip">-</b></div>
+  <div class="row"><span>配置热点</span><b>oled-setup · 192.168.7.1</b></div>
+  <div class="row"><span>WiFi 信号</span><b id="rssi">-</b></div>
+  <div class="row"><span>数据链路</span><b id="link">-</b></div>
+  <button class="gray" onclick="loadInfo()">刷新</button>
+</section>
+
+<section>
+  <h2>参数配置</h2>
+  <form id="cfgForm" onsubmit="return saveCfg(event)">
+    <label>WiFi 名称</label>
+    <input id="ssid" maxlength="32" required>
+    <label>WiFi 密码</label>
+    <input id="pass" maxlength="64" type="password" placeholder="开放热点留空">
+    <label>服务端地址</label>
+    <input id="server_uri" maxlength="64" placeholder="ws://192.168.4.1/ws">
+    <div class="hint">留空就自动连网关，车上是 192.168.4.1。端口不一样时填完整地址，比如 ws://192.168.2.1:8080/ws。</div>
+    <label>轮胎直径（mm）</label>
+    <input id="diam_mm" type="number" step="0.1" min="20" max="200" required>
+    <div class="hint">车速换算用，跟车端的轮径配置各配各的。</div>
+    <label>断开判定阈值（ms）</label>
+    <input id="disconnect_ms" type="number" step="100" min="500" max="10000" required>
+    <div class="hint">连续这么久收不到数据就判定断开，屏幕清成断开标记。</div>
+    <button type="submit">保存并重启</button>
+    <div class="msg" id="cfgMsg"></div>
+  </form>
+</section>
+
+<section>
+  <h2>固件升级</h2>
+  <div class="row"><span>当前分区</span><b id="running">-</b></div>
+  <div class="row"><span>备用分区</span><b id="other">-</b></div>
+  <input id="fwFile" type="file" accept=".bin">
+  <progress id="otaProg" value="0" max="100" style="display:none"></progress>
+  <button onclick="doOta()" id="otaBtn">上传并升级</button>
+  <button class="gray" onclick="doRollback()">回退上一版</button>
+  <div class="hint">升级过程中别断电。完成后设备自动重启，新固件起不来会自己退回上一版。</div>
+  <div class="msg" id="otaMsg"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+/* 表单被用户改过就不再自动回填：3 秒轮询抢在点「保存」之前把旧值
+ * 刷回去，会把刚填的配置顶掉（真机踩过），回填只在没动过时做 */
+let cfgTouched = false;
+$("cfgForm").addEventListener("input", () => { cfgTouched = true; });
+
+async function loadInfo() {
+  try {
+    const r = await fetch("/api/info");
+    const d = await r.json();
+    $("version").textContent = d.version || "-";
+    $("ip").textContent = d.ip || "(还没拿到 IP)";
+    $("rssi").textContent = d.rssi ? d.rssi + " dBm" : "-";
+    if (d.frame_age_ms >= 0) {
+      $("link").textContent = "在线，最近一帧 " + (d.frame_age_ms / 1000).toFixed(1) + " 秒前";
+    } else {
+      $("link").textContent = "还没收到数据";
+    }
+    if (!cfgTouched) {
+      $("ssid").value = d.cfg.ssid;
+      $("pass").value = d.cfg.pass;
+      $("server_uri").value = d.cfg.server_uri;
+      $("diam_mm").value = d.cfg.diam_mm;
+      $("disconnect_ms").value = d.cfg.disconnect_ms;
+    }
+    const o = await (await fetch("/api/ota/info")).json();
+    $("running").textContent = o.running + "（" + (o.version || "?") + "）";
+    $("other").textContent = o.other + "（" + (o.other_state) + (o.other_version ? "，" + o.other_version : "") + "）";
+  } catch (e) {
+    $("link").textContent = "页面连不上设备";
+  }
+}
+
+async function saveCfg(ev) {
+  ev.preventDefault();
+  const msg = $("cfgMsg");
+  msg.className = "msg";
+  msg.textContent = "保存中……";
+  try {
+    const body = {
+      ssid: $("ssid").value,
+      pass: $("pass").value,
+      server_uri: $("server_uri").value.trim(),
+      diam_mm: parseFloat($("diam_mm").value),
+      disconnect_ms: parseInt($("disconnect_ms").value, 10),
+    };
+    const r = await fetch("/api/cfg", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "保存失败");
+    msg.className = "msg ok";
+    msg.textContent = "已保存（WiFi: " + body.ssid + "），设备正在重启。等它连上 WiFi 再点刷新。";
+  } catch (e) {
+    msg.className = "msg err";
+    msg.textContent = e.message;
+  }
+  return false;
+}
+
+function doOta() {
+  const f = $("fwFile").files[0];
+  const msg = $("otaMsg");
+  if (!f) {
+    msg.className = "msg err";
+    msg.textContent = "先选固件包";
+    return;
+  }
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/ota/upload");
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      $("otaProg").style.display = "block";
+      $("otaProg").value = (e.loaded / e.total) * 100;
+    }
+  };
+  xhr.onload = () => {
+    let d = {};
+    try { d = JSON.parse(xhr.responseText); } catch (e) {}
+    if (d.ok) {
+      msg.className = "msg ok";
+      msg.textContent = "升级成功，设备正在重启。等约 10 秒再点刷新。";
+    } else {
+      msg.className = "msg err";
+      msg.textContent = d.error || ("升级失败（" + xhr.status + "）");
+    }
+    $("otaProg").style.display = "none";
+    $("otaBtn").disabled = false;
+  };
+  xhr.onerror = () => {
+    msg.className = "msg err";
+    msg.textContent = "上传中断了，看看网络再试";
+    $("otaProg").style.display = "none";
+    $("otaBtn").disabled = false;
+  };
+  $("otaBtn").disabled = true;
+  msg.className = "msg";
+  msg.textContent = "上传中……";
+  /* 直接发原始文件字节：FormData 的 multipart 信封会被当固件写进
+   * flash，镜像校验必挂，服务端按原始流收 */
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.send(f);
+}
+
+async function doRollback() {
+  const msg = $("otaMsg");
+  msg.className = "msg";
+  msg.textContent = "切换中……";
+  try {
+    const r = await fetch("/api/ota/rollback", { method: "POST" });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "回退失败");
+    msg.className = "msg ok";
+    msg.textContent = "已切到 " + (d.version || "上一版") + "，设备正在重启。";
+  } catch (e) {
+    msg.className = "msg err";
+    msg.textContent = e.message;
+  }
+}
+
+loadInfo();
+setInterval(loadInfo, 3000);
+</script>
+</body>
+</html>
