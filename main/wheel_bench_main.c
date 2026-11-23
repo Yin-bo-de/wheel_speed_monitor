@@ -63,6 +63,9 @@ static wheel_chan_cfg_t s_chan_cfg[WHEEL_COUNT];
  * 配置从 s_cfg 每拍现读现用，不跨任务共享可变结构。 */
 static servo_sim_t s_servo_sim;
 static servo_ledc_t s_servo_ledc;
+/* 自控舵机两路（v7 底板 J10/J11）：不接策略链，当前只做上电中位输出；
+ * 将来 MPU6050 姿态控制逻辑从 s_servo_auto 的 set_us 接口接进来。 */
+static servo_ledc_auto_t s_servo_auto;
 static strategy_config_t s_strat_cfg; /* 采样任务专用，不跨任务共享 */
 static servo_render_state_t s_servo_disp; /* 采样任务写、ws_push 读（同 disp 约定） */
 
@@ -584,7 +587,10 @@ void app_main(void)
      * 耦合的噪声会被舵机解成随机脉宽。输出低 = 无脉冲 = 脱力。LEDC 惰性
      * 初始化时重新接管（init 尾部本来也先停波钉低）。跑在任务创建前，
      * 无并发。 */
-    static const gpio_num_t servo_pins[] = { WHEEL_SERVO_GPIO_FRONT, WHEEL_SERVO_GPIO_REAR };
+    static const gpio_num_t servo_pins[] = {
+        WHEEL_SERVO_GPIO_FRONT, WHEEL_SERVO_GPIO_REAR,
+        WHEEL_SERVO_GPIO_AUTO1, WHEEL_SERVO_GPIO_AUTO2,
+    };
     for (size_t i = 0; i < sizeof(servo_pins) / sizeof(servo_pins[0]); i++) {
         (void)gpio_set_direction(servo_pins[i], GPIO_MODE_OUTPUT);
         (void)gpio_set_level(servo_pins[i], 0);
@@ -658,6 +664,13 @@ void app_main(void)
     /* 舵机执行器：起步用模拟模型，起始位置取配置里的解锁档（上电差速应松开）。
      * 采样任务起来之前初始化，无竞争。 */
     servo_sim_init(&s_servo_sim, (float)cfg.servo_sim_speed_us_s, cfg.servo_unlock_us);
+    /* 自控舵机 bring-up：上电即出 50Hz 中位，示波器/真舵机都能验两路口。
+     * 这一组独立于差速舵机的模拟/LEDC 选择，失败也只记日志，不挡启动。 */
+    esp_err_t auto_err = servo_ledc_auto_init(&s_servo_auto, WHEEL_SERVO_GPIO_AUTO1,
+                                              WHEEL_SERVO_GPIO_AUTO2, 1500);
+    if (auto_err != ESP_OK) {
+        ESP_LOGE(TAG, "自控舵机初始化失败(%d)，J10/J11 无输出", auto_err);
+    }
     strategy_init();
     /* 遥控模型只清空状态；GPIO 捕获留给采样任务惰性初始化（与 LEDC 同规矩：
      * 引脚配置与中断挂载都在采样任务上下文里做） */
