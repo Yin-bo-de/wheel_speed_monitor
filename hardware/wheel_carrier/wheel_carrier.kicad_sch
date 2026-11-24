@@ -6937,7 +6937,7 @@
       (at 351.79 97.79 0)
       (effects (font (size 1.27 1.27)) (justify right))
     )
-    (property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+    (property "Footprint" "Resistor_SMD:R_0805_2012Metric"
       (at 354.33 96.52 0)
       (effects (font (size 1.27 1.27)) (hide yes))
     )

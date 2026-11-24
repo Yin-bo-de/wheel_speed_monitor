@@ -465,7 +465,9 @@ def build():
         else:
             raise ValueError(f"{ref} 的接口类型 {kind!r} 不认识")
     for ref, sig, y in PULLUPS:
-        r = place(ref, "Device:R", "10k", (PULLUP_X, y), fp=R_FP,
+        # 左前上拉用 0805 贴片（嘉立创 SMT 只贴贴片件），其余三路仍直插
+        fp = SMD_R_FP if ref == "R1" else R_FP
+        r = place(ref, "Device:R", "10k", (PULLUP_X, y), fp=fp,
                   props={"Reference": (-2.54, -1.27, "right"), "Value": (-2.54, 1.27, "right")})
         # 顶端直接贴 +3V3 标签、不伸短线：相邻上拉若上下各留 2.54 短线，
         # 端点会落在同一坐标上把两条网络短接（间距恰好 12.7 = 两倍整个器件跨度）
@@ -624,6 +626,7 @@ def build():
 
 
 R_FP = "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"
+SMD_R_FP = "Resistor_SMD:R_0805_2012Metric"
 D_FP = "Diode_THT:D_DO-201AD_P15.24mm_Horizontal"
 CP_FP = "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
 

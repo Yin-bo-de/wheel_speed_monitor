@@ -74,7 +74,7 @@ PLACEMENT = [
     ("J5",  "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "霍尔·左后", 30, 5, 90),
     ("J6",  "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "霍尔·右后", 48, 5, 90),
     ("J4",  "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical", "霍尔·右前", 64, 5, 90),
-    ("R1",  R_FP, "10k", 8, 13.5, 90),
+    ("R1",  "Resistor_SMD:R_0805_2012Metric", "10k", 8, 13.5, 90),
     ("R3",  R_FP, "10k", 26, 13.5, 90),
     ("R4",  R_FP, "10k", 44, 13.5, 90),
     ("R2",  R_FP, "10k", 61, 13.5, 90),
@@ -215,7 +215,7 @@ REF_MOVES = {
     # 电源条位号放西端空位（屏幕 (73,28)）
     "J15":  ("3.27", "-3.11"),
     # 霍尔列的电阻位号都挪到本件西/东侧，别压在本体或邻件丝印上
-    "R1":   ("5.08", "-2.5"),
+    "R1":   ("0", "-2.5"),
     "R2":   ("5.08", "-2.5"),
     "R3":   ("5.08", "-2.5"),
     "R4":   ("5.08", "-2.5"),
@@ -494,14 +494,19 @@ def build_routes(padmap):
     v3 = "+3V3"
     via(v3, 8.0, 31.0)
     t(v3, "B.Cu", w3, [(8.0, 31.0), (8.0, 55.5), (12.7, 55.5), (12.7, 58.9)])
+    # 左前上拉（R1）换成 0805 贴片后，焊盘不再是通孔、落不到 In2 平面：
+    # 就近打一颗 0.6/0.3 过孔，短线把贴片的 +3V3 端接回 3V3 平面
+    t(v3, "F.Cu", wS, [(8.0, 14.4125), (8.0, 16.9)])
+    via(v3, 8.0, 16.9)
 
     # ---- 霍尔四路 ----
     # 每列：接口 S → R11 → GPIOx；HALL_x 同时挂上拉和 LED 链。
     # 上拉的 +3V3 端、330R 的 +3V3 端都靠 In2 顶带，GND 端靠 In1，
-    # 所以本地只剩 HALL_x / LED 阳极 / GPIOx 三段要画。
+    # 所以本地只剩 HALL_x / LED 阳极 / GPIOx 三段要画。左前上拉换成 0805 贴片后
+    # 焊盘离接口更近，起始点用 pu_y 单独给（其余三路仍是直插焊盘的上端）。
     def hall_cell(xc, r330, led, hall_net, gpio_net, lane_x, corridor_y,
-                  target_x, target_y, via_pt=None):
-        t(hall_net, "F.Cu", wS, [(xc - 4, 8.42), (xc - 4, 6.5), (xc + 2.54, 6.5)])
+                  target_x, target_y, via_pt=None, pu_y=8.42):
+        t(hall_net, "F.Cu", wS, [(xc - 4, pu_y), (xc - 4, 6.5), (xc + 2.54, 6.5)])
         t(hall_net, "F.Cu", wS, [(xc + 2.54, 5.0), (xc + 2.54, 7.92)])
         t(hall_net, "F.Cu", wS, [(xc, 6.5), (xc, 22.27), (xc + 7.62, 22.27)])
         anode = padmap[r330]["2"]
@@ -526,7 +531,8 @@ def build_routes(padmap):
 
     # 左前 / 左后：F 层北侧横巷，越靠西越靠北；右后借一次 B 层；
     # 右前（GPIO14）走东缘长巷，刻意远离 IO13/IO15 的引出车道。
-    hall_cell(12, "R7", "LED3", "HALL_LF", "GPIO1", 16.51, 25.5, 17.78, 33.5)
+    hall_cell(12, "R7", "LED3", "HALL_LF", "GPIO1", 16.51, 25.5, 17.78, 33.5,
+              pu_y=12.5875)
     hall_cell(30, "R8", "LED4", "HALL_LB", "GPIO21", 34.51, 28.5, 53.34, 33.5)
     hall_cell(48, "R9", "LED5", "HALL_RB", "GPIO47", 52.51, 25.0, 50.8, 33.5,
               via_pt=(52.51, 25.0))
