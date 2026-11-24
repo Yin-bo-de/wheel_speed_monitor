@@ -584,7 +584,10 @@ def build_routes(padmap):
         t(net, "B.Cu", wS, [(tx, 26.5), (tx, 33.5)])
 
     # ---- 电源局部 ----
-    t("Net-(D1-A)", "B.Cu", 1.0, [(3.5, 88.58), (3.5, 84.5), (30.12, 84.5), (30.12, 80)])
+    # BEC 输入端是整条功率路径最窄的一环：1.5 宽 + 两个 45° 倒角，
+    # 四路舵机堵转时不至于在这段发热/压降
+    t("Net-(D1-A)", "B.Cu", wM, [(3.5, 88.58), (3.5, 86.5), (5.5, 84.5),
+                                 (28.12, 84.5), (30.12, 82.5), (30.12, 80)])
     t("DEV_5V", "B.Cu", 0.5, [(41.88, 91), (41.88, 87.8)])
     t("DEV_5V", "B.Cu", 0.5, [(41.88, 87.8), (33.5, 87.8), (33.5, 91)])       # C2.1
     # 沿板底东缘北上后从 J13/J14 东侧走近 J2.20：老路线在 y=58.9 直接横穿
@@ -921,24 +924,26 @@ def layer_and_setup():
     stackup = K.get(setup, "stackup")
     old = {str(c[1]): c for c in stackup if isinstance(c, list) and c and c[0] == "layer"}
 
-    def cu(name):
-        return ["layer", K.Q(name), ["type", K.Q("copper")], ["thickness", "0.035"]]
+    def cu(name, th="0.035"):
+        return ["layer", K.Q(name), ["type", K.Q("copper")], ["thickness", th]]
 
     def diel(name, typ, th):
         return ["layer", K.Q(name), ["type", K.Q(typ)], ["thickness", th],
                 ["material", K.Q("FR4")], ["epsilon_r", "4.5"], ["loss_tangent", "0.02"]]
 
-    # 1.6mm 总厚：4×0.035 铜 + 0.1/1.24/0.1 介质 + 两面 0.01 阻焊 = 1.6
+    # 按嘉立创 4 层 1.6mm 标准叠层 JLC04161H-7628 写：外层 1oz、内层 0.5oz、
+    # 7628 半固化片 0.2104、芯板 1.065；加两面 0.01 阻焊约 1.61。
+    # 之前写的 0.1/1.24/0.1、内层 1oz 不是厂家标准叠层，下单时会名实不符。
     new_layers = [
         copy.deepcopy(old["F.SilkS"]),
         copy.deepcopy(old["F.Paste"]),
         copy.deepcopy(old["F.Mask"]),
         cu("F.Cu"),
-        diel("dielectric 1", "prepreg", "0.1"),
-        cu("In1.Cu"),
-        diel("dielectric 2", "core", "1.24"),
-        cu("In2.Cu"),
-        diel("dielectric 3", "prepreg", "0.1"),
+        diel("dielectric 1", "prepreg", "0.2104"),
+        cu("In1.Cu", "0.0152"),
+        diel("dielectric 2", "core", "1.065"),
+        cu("In2.Cu", "0.0152"),
+        diel("dielectric 3", "prepreg", "0.2104"),
         cu("B.Cu"),
         copy.deepcopy(old["B.Mask"]),
         copy.deepcopy(old["B.Paste"]),
