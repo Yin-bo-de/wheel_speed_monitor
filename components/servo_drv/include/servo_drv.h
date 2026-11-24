@@ -32,6 +32,10 @@ extern "C" {
  * ledc_timer_config(50Hz) 会把相机 XCLK 从 20MHz 改成 50Hz，画面直接停。 */
 #define SERVO_LEDC_TIMER LEDC_TIMER_1
 #define SERVO_LEDC_CHANNEL_BASE LEDC_CHANNEL_2
+/* 自控舵机第二组用 CHANNEL_4/5，与差速组共用 TIMER_1（50Hz/14bit 同参数，
+ * 重复配置是幂等的），仍然避开相机 XCLK 的 TIMER_0/CHANNEL_0。 */
+#define SERVO_LEDC_AUTO_CHANNELS 2
+#define SERVO_LEDC_AUTO_CHANNEL_BASE LEDC_CHANNEL_4
 
 /* 调用方须传零初始化的实例（用 static 即可）：inited 是"是否已 bring-up"的
  * 唯一依据，靠它把重复初始化挡在外面，不做 memset 复位。 */
@@ -53,6 +57,27 @@ esp_err_t servo_ledc_init(servo_ledc_t *s, int gpio_front, int gpio_rear,
                           const uint32_t unlock_us[SERVO_ACT_CHANNELS]);
 
 extern const servo_act_ops_t servo_ledc_ops;
+
+/* ---- 自控舵机组（独立于策略链，将来由 MPU6050 姿态控制驱动）----
+ *
+ * 不复用 servo_act_ops_t：这一组不接策略状态机，只需要"设脉宽/停波"两个
+ * 直给接口，套一层 ops 反而多出用不上的 step/get_state。初始化后立即输出
+ * center_us（中位 1500µs），上电就能用示波器或真舵机验证两路口。
+ *
+ * 并发约定：只允许在任务启动前初始化一次；set_us/stop 将来由唯一控制方
+ * 调用，与差速组一样不做跨任务加锁。 */
+typedef struct {
+    int gpio[SERVO_LEDC_AUTO_CHANNELS];
+    uint32_t target_us[SERVO_LEDC_AUTO_CHANNELS];
+    bool inited;
+} servo_ledc_auto_t;
+
+/* 幂等：已初始化直接返回 ESP_OK。center_us 越出 SERVO_ACT_MIN/MAX_US 报参数错。 */
+esp_err_t servo_ledc_auto_init(servo_ledc_auto_t *s, int gpio_a, int gpio_b,
+                               uint32_t center_us);
+esp_err_t servo_ledc_auto_set_us(servo_ledc_auto_t *s, uint8_t ch, uint32_t us);
+/* 停波 = 舵机脱力，输出钉低（与差速组停波同一语义）。 */
+esp_err_t servo_ledc_auto_stop(servo_ledc_auto_t *s, uint8_t ch);
 
 #ifdef __cplusplus
 }

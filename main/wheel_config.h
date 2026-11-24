@@ -13,8 +13,10 @@ extern "C" {
 
 /* 4 路霍尔传感器 GPIO。
  * 板 GPIO 占用核对：摄像头 4,5,6,7,8,9,10,11,12,13,15,16,17,18；SD 38,39,40；
- * PSRAM 35,36,37；USB 19,20；CH343 串口 43,44；WS2812 48；GPIO2 板载 LED；
- * strapping 0,3,45,46。唯一净空的是 1,14,21,47，按轮顺序分配。 */
+ * PSRAM 35,36,37；USB 19,20；CH343 串口 43,44；自控舵机 2,48（v7 起）；
+ * strapping 0,3,45,46。唯一净空的是 1,14,21,47，按轮顺序分配。
+ * 2/48 让给自控舵机后，板载 LED 常亮/微闪、WS2812 乱闪属预期；后续 IMU
+ * 只能与摄像头共用 SCCB 的 IO4/IO5。 */
 #define WHEEL_HALL_GPIO_LF 1   /* 左前 */
 #define WHEEL_HALL_GPIO_RF 14  /* 右前 */
 #define WHEEL_HALL_GPIO_LR 21  /* 左后 */
@@ -75,6 +77,15 @@ extern "C" {
  * RC 接收机输入脚二期再定；动硬件前核对 CLAUDE.md 引脚表。 */
 #define WHEEL_SERVO_GPIO_FRONT 41 /* 前差速 */
 #define WHEEL_SERVO_GPIO_REAR 42  /* 后差速 */
+
+/* 两路自控舵机输出（v7 底板 J10/J11）：将来按车上 MPU6050 的姿态自动控制
+ * 角度，当前固件只做上电 bring-up（输出中位 1500µs，可用示波器/舵机验证）。
+ *
+ * 2/48 是这块开发板上仅剩的两根能用的脚：2 原为板载 LED、48 原为 WS2812。
+ * 牺牲它们换两路舵机输出——灯效乱闪无害，而 45/46/0/3 是上电敏感脚、
+ * 35~37 是 PSRAM、19/20 是 USB，都不能动（见 CLAUDE.md 引脚表）。 */
+#define WHEEL_SERVO_GPIO_AUTO1 2  /* 自控舵机 1（J10） */
+#define WHEEL_SERVO_GPIO_AUTO2 48 /* 自控舵机 2（J11） */
 
 /* 遥控接收机三路 PWM 输入（GPIO 双沿中断测脉宽，见 components/rc_capture）。
  *

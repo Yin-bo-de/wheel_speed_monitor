@@ -9,12 +9,16 @@
 图纸内容全部由本文件的常量定义（引脚映射 / 元件表 / 布局坐标 / 网络标签）：
 - 开发板两排 20 针排母：J1 顶排接开发板右排（IO43 列），J2 底排接左排
   （3V3 列），正面插装；针号 = 物理位置，针 1 从远离 USB 的一端数起。
-- 接口：霍尔×4 为 +V/GND/信号（脚序对 A3144）；舵机×2 为 信号/+5V/GND；
-  遥控三通道合并成一个 3 针信号排针，接收机的电源和地走 J17。
+- 接口：霍尔×4 为 +V/GND/信号（脚序对 A3144）；舵机×4（J7/J8 差速 +
+  J10/J11 自控）为 信号/+5V/GND；遥控三通道合并成一个 3 针信号排针，
+  接收机的电源和地走 J17。
 - BEC 输入 → 防反接二极管 → +BEC 主路（霍尔、J16/J17、电源条、降压段）；
-  LM2596 降到 +5V 供开发板和两路舵机。
+  LM2596 降到 +5V 供开发板和四路舵机。
 - 霍尔信号各配 10k 上拉到 +3V3（上拉取 3.3V，传感器 VCC 走 BEC——
   A3144 开集电极输出，高电平由 3.3V 上拉决定，对 GPIO 安全）。
+- v7：每路霍尔在 HALL_x 与 GPIOx 之间串 1k（R11~R14），GPIOx 对地挂
+  100nF（C5~C8），四路统一低通，右前被相机时钟耦合出的毛刺在进 MCU
+  之前先衰减。
 
 坐标全部落在 1.27mm 网格（g() 会断言）；uuid 用 uuid5 从固定种子派生，
 重跑生成时同一元素的 uuid 不变，git diff 干净。
@@ -46,8 +50,8 @@ ROOT_UUID = "11111111-2222-4333-8444-555555555555"
 NS = _uuid.UUID(ROOT_UUID)
 
 TITLE = "轮速监测台转接底板"
-DATE = "2026-10-28"
-REV = "v6"
+DATE = "2026-11-23"
+REV = "v7"
 PAPER = "A3"
 
 
@@ -239,6 +243,24 @@ def chain_hall_led(r_ref, led_ref, x, y, net, side="left"):
     stub_label(led, "1", "down", net)
 
 
+def hall_rc(r_ref, c_ref, x, y, hall_net, gpio_net):
+    """霍尔 RC 低通（v7）：HALL_x — 1k 串阻 — GPIOx — 100nF — GND。
+
+    横排在接口正下方的 7.62mm 空行里：串阻在左、电容在右，中间导线直连并挂
+    GPIOx 标签；HALL_x 与接口 3 脚标签同名相连。传感器侧（接口/上拉/指示灯）
+    留在 HALL_x，电容装在 MCU 侧。"""
+    ry = y + 8.89
+    r = place(r_ref, "Device:R", "1k", (x, ry), rot=90, fp=R_FP,
+              props={"Reference": (0, -3.05, None), "Value": (0, 2.54, None)})
+    stub_label(r, "1", "left", hall_net)
+    c = place(c_ref, "Device:C", "100nF", (x + 15.24, ry), rot=90,
+              fp="Capacitor_THT:C_Disc_D5.0mm_W2.5mm_P5.00mm",
+              props={"Reference": (0, -3.05, None), "Value": (0, 2.54, None)})
+    add_wire(*pin_pos(r, "2"), *pin_pos(c, "1"), f"{r_ref}-{c_ref}")
+    pin_label(c, "1", gpio_net, "right")
+    stub_label(c, "2", "right", "GND")
+
+
 # ---------------------------------------------------------------- 自定义符号：开发板两排针座
 
 ROW_L_NAMES = ["3V3", "EN", "IO4", "IO5", "IO6", "IO7", "IO15", "IO16", "IO17", "IO18",
@@ -333,25 +355,33 @@ ROW_R_NETS = {
     "17": "GPIO21", "18": "IO20", "19": "IO19", "20": "GND",
 }
 
-# 右侧接口列：3 针接口从上到下
+# 右侧接口列：3 针接口从上到下。v7 行距 12.7→17.78，每路接口下方多留
+# 7.62mm 空行放 1k 串阻 + 100nF（见 hall_rc()）。
 CONN_COL_X = 337.82
 CONN_ROWS = [
-    ("J3", "霍尔·左前", "GPIO1", 96.52, "hall"),
-    ("J5", "霍尔·左后", "GPIO21", 109.22, "hall"),
-    ("J6", "霍尔·右后", "GPIO47", 121.92, "hall"),
-    ("J7", "舵机·前差速", "GPIO41", 134.62, "servo"),
-    ("J8", "舵机·后差速", "GPIO42", 147.32, "servo"),
-    ("J9", "遥控·三通道信号", "GPIO38", 160.02, "rc"),
+    ("J3", "霍尔·左前", "HALL_LF", 96.52, "hall"),
+    ("J5", "霍尔·左后", "HALL_LB", 114.3, "hall"),
+    ("J6", "霍尔·右后", "HALL_RB", 132.08, "hall"),
+    ("J7", "舵机·前差速", "GPIO41", 149.86, "servo"),
+    ("J8", "舵机·后差速", "GPIO42", 167.64, "servo"),
+    ("J9", "遥控·三通道信号", "GPIO38", 185.42, "rc"),
+    # v7 新增两路自控舵机：信号 = IO2 / IO48，+V 仍取板载 5V
+    ("J10", "舵机·自控1", "IO2", 203.2, "servo"),
+    ("J11", "舵机·自控2", "IO48", 220.98, "servo"),
 ]
 # 遥控三通道只留一个 3 针信号排针：1=模式、2=前差速、3=后差速。
 # 接收机的电源和地仍走 J17（油门直通口），这里不引出 +V/GND。
 RC_PINS = (("1", "GPIO38"), ("2", "GPIO39"), ("3", "GPIO40"))
-# 上拉电阻列（与各自接口同高）
+# 上拉电阻列（与各自接口同高）。v7 起上拉挂在霍尔侧 HALL_x：串阻只隔开
+# MCU，不隔开传感器与上拉/指示灯。
 PULLUP_X = 354.33
-PULLUPS = [("R1", "GPIO1", 96.52), ("R3", "GPIO21", 109.22), ("R4", "GPIO47", 121.92)]
-# 左侧：霍尔·右前 + 它的上拉
+PULLUPS = [("R1", "HALL_LF", 96.52), ("R3", "HALL_LB", 114.3), ("R4", "HALL_RB", 132.08)]
+# 左侧：霍尔·右前 + 它的上拉 + 串阻/电容
 J4_AT = (59.69, 134.62)
 R2_AT = (76.2, 128.27)
+# 四路 RC 横排在各自接口下方：串阻中心 = 接口 x - 7.62，电容 = 串阻 + 15.24
+RC_DX = -7.62
+RC_RF_X = 52.07
 
 
 def build():
@@ -442,11 +472,15 @@ def build():
         # +3V3 标签往左伸：右伸会顶到邻列霍尔指示灯链的"LEDx"文字
         pin_label(r, "1", "+3V3", "right")
         stub_label(r, "2", "down", sig)
-    # 霍尔指示灯（右侧三路）：错列摆放——链条高 20.32 超过 12.7 的行距，
-    # 同一列上会前后压住，隔一列一错开刚好错得开
-    chain_hall_led("R7", "LED3", 365.76, 96.52, "GPIO1", side="left")
-    chain_hall_led("R8", "LED4", 377.19, 109.22, "GPIO21", side="left")
-    chain_hall_led("R9", "LED5", 365.76, 121.92, "GPIO47", side="left")
+    # 霍尔指示灯（右侧三路）：错列摆放——链条高 20.32 超过行距时同一列会
+    # 前后压住，隔一列一错开刚好错得开
+    chain_hall_led("R7", "LED3", 365.76, 96.52, "HALL_LF", side="left")
+    chain_hall_led("R8", "LED4", 381.0, 114.3, "HALL_LB", side="left")
+    chain_hall_led("R9", "LED5", 365.76, 132.08, "HALL_RB", side="left")
+    # 右侧三路 RC：横排在各自接口下方的空行
+    hall_rc("R11", "C5", CONN_COL_X + RC_DX, 96.52, "HALL_LF", "GPIO1")
+    hall_rc("R12", "C6", CONN_COL_X + RC_DX, 114.3, "HALL_LB", "GPIO21")
+    hall_rc("R13", "C7", CONN_COL_X + RC_DX, 132.08, "HALL_RB", "GPIO47")
 
     # ---- 左侧：霍尔·右前 -----------------------------------------------------
     j4 = place("J4", "Connector_Generic:Conn_01x03", "霍尔·右前", J4_AT,
@@ -454,13 +488,15 @@ def build():
                props={"Reference": (2.54, -3.81, "left"), "Value": (-13.97, 3.81, "right")})
     stub_label(j4, "1", "left", "+BEC")
     stub_label(j4, "2", "left", "GND")
-    stub_label(j4, "3", "left", "GPIO14")
+    stub_label(j4, "3", "left", "HALL_RF")
     r2 = place("R2", "Device:R", "10k", R2_AT, fp=R_FP,
                props={"Reference": (2.54, -1.27, "left"), "Value": (2.54, 1.27, "left")})
     pin_label(r2, "1", "+3V3", "left")
-    stub_label(r2, "2", "down", "GPIO14")
+    stub_label(r2, "2", "down", "HALL_RF")
     # 霍尔指示灯（右前）
-    chain_hall_led("R6", "LED2", 88.9, 128.27, "GPIO14", side="right")
+    chain_hall_led("R6", "LED2", 88.9, 128.27, "HALL_RF", side="right")
+    # 右前 RC：串阻电容放在 J4 西侧空白带
+    hall_rc("R14", "C8", RC_RF_X, 134.62, "HALL_RF", "GPIO14")
 
     # ---- 电源区（底部） -------------------------------------------------------
     # BEC 输入端子：1=VIN 2=GND（电调 BEC 输出，6V 或 7.4V 档）
@@ -582,8 +618,9 @@ def build():
     add_text("35/36/37=PSRAM，19/20=USB，0/3/45/46=启动脚：接外部电路前先看 README", 170.18, 101.6)
     add_text("J16 接电调（BEC 进板）；油门信号经底板直通到 J17，再回接收机油门通道；J17 给接收机供电", 254.0, 210.82)
     add_text("BEC 输入 6~7.4V：板上降到 5V 给开发板和舵机；霍尔、J16/J17 走 BEC 原电压", 105.41, 270.51)
-    add_text("舵机：信号/5V/GND；霍尔：+V/GND/信号（A3144）；遥控 J9：三路信号，无电源/地", 320.04, 88.9)
+    add_text("舵机：信号/5V/GND（J7/J8 差速、J10/J11 自控）；霍尔：+V/GND/信号（A3144）；遥控 J9：三路信号，无电源/地", 299.72, 86.36)
     add_text("霍尔指示灯：亮 = 磁铁触发（信号被拉低）；轮子转动能看到闪烁", 354.33, 83.82)
+    add_text("v7：霍尔加 1k+100nF RC 低通（R11~R14/C5~C8，电容在 MCU 侧）；四路舵机共用板载 5V，大舵机请外置 BEC", 299.72, 240.03)
 
 
 R_FP = "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal"

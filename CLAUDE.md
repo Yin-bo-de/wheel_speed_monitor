@@ -62,6 +62,10 @@ ctest --test-dir tests/native/build --output-on-failure
 - **舵机控制链（strategy → servo_act/servo_drv）只跑在 sampler_task 里**，
   httpd 只改配置数据、不碰执行器句柄；执行器在模拟与 LEDC 之间的切换也在这里做
   （`servo_act_select`），这样 LEDC 的初始化与寄存器写全落在单任务上下文，不用加锁。
+- **自控舵机 J10/J11（GPIO2/48）独立于策略链**：`app_main` 在最早期就把两个脚
+  钉低，配置加载后调 `servo_ledc_auto_init()` 出 50Hz 中位 1500µs（CHANNEL_4/5、
+  同 TIMER_1，避开相机 XCLK 的 TIMER_0/CH0）；将来 MPU6050 逻辑只用
+  `servo_ledc_auto_set_us()`，不要塞进 strategy/servo_act 的 ops 接口。
 - **遥控捕获（rc_capture）同理**：GPIO 配置与中断挂载在采样任务里惰性做
   （`rc_capture_select`），httpd 只改 `rc_sim` / `rc_sim_us` 这两个配置项。
 - **相机句柄只在 `cam_publish_task` 里碰**：`esp_camera_init/deinit/fb_get/fb_return`
@@ -101,8 +105,11 @@ ctest --test-dir tests/native/build --output-on-failure
 | 用途 | GPIO | 备注 |
 |---|---|---|
 | 4 路霍尔输入 | 1 / 14 / 21 / 47 | 摄像机占 4-18、PSRAM 35-37、USB 19/20、
-  UART 43/44、WS2812=48、GPIO2 板载 LED、strapping 0/3/45/46 → 仅剩这 4 个空闲
+  UART 43/44、自控舵机 2/48、strapping 0/3/45/46 → 仅剩这 4 个空闲
   （SD 的 38-40 后来让给了遥控输入） |
+| 自控舵机输出 | 2 / 48 | 自控 1 / 自控 2（v7 底板 J10/J11），LEDC 50Hz、
+  中位 1500µs bring-up。牺牲板载 LED（2）和 WS2812（48）；灯效异常属预期，
+  不要再把这两个脚借给别的外设（后续 IMU 只能与摄像头共用 SCCB 的 4/5） |
 | 差速舵机输出 | 41 / 42 | 前 / 后差速，LEDC 50Hz。是 S3 的 JTAG 脚（MTDI/MTMS），
   但默认调试通道是芯片内置 USB-Serial-JTAG，走内部 TAP、不占引脚
   （IDF 文档 jtag-debugging/tips-and-quirks），所以直接用；只有烧了
@@ -127,7 +134,8 @@ main（编排/任务/WiFi/httpd）
  │  └─ strategy_render  舵机 JSON 块渲染（纯 C）
  ├─ servo_act        舵机执行器接口 + 模拟模型（纯 C）
  ├─ servo_drv        LEDC 硬件输出（IDF 依赖）
- │                   └─ 与 servo_act 共用 servo_act_ops_t，按配置二选一
+ │                   └─ 与 servo_act 共用 servo_act_ops_t，按配置二选一；
+ │                      另有 CHANNEL_4/5 的自控组（servo_ledc_auto_*），不接策略链
  ├─ rc_input         遥控判定与仲裁：通道有效性 / 模式判定 / 透传回落（纯 C）
  │  └─ rc_render        遥控 JSON 块渲染（纯 C）
  ├─ rc_capture       GPIO 双沿中断测遥控脉宽（IDF 依赖）
